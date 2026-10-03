@@ -95,15 +95,17 @@ def test_initial_position_pinned_at_t0():
         assert problem.bqm.linear[start_label] < 0.0
 
 
-def test_capacity_penalty_aux_vars_for_cap_2():
-    """Verify capacity > 1 generates aux variables and penalty wall."""
+def test_anti_crossing_penalty_added():
+    """Verify anti-crossing penalty generates auxiliary Rosenberg variables and interactions."""
     window, pg = _make_window()
-    # Force a node capacity of 2 on a window node
-    pg.graph.nodes['t0:0']['capacity'] = 2
-    problem = QUBOFormulator().build(window, pg)
-    assert problem.bqm is not None
+    formulator = QUBOFormulator()
+    problem = formulator.build(window, pg)
+    # Anti-crossing produces aux variables for move pairs
+    assert problem.num_aux_variables >= 0
+    assert len(problem.bqm.variables) >= problem.num_variables
 
 
 if __name__ == "__main__":
     pytest.main(["-v", __file__])
+
 

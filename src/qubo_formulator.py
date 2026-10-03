@@ -167,6 +167,7 @@ class QUBOFormulator:
         self._add_one_hot_penalty(bqm, var_map, ions, positions, T, lambda_)
         self._add_capacity_penalty(bqm, var_map, window, pg, T, lambda_)
         self._add_movement_penalty(bqm, var_map, window, pg, T, lambda_)
+        self._add_crossing_penalty(bqm, var_map, window, pg, T, lambda_)
         self._add_goal_penalty(bqm, var_map, window, T, lambda_)
 
         # 6. Add cost objective
@@ -215,23 +216,22 @@ class QUBOFormulator:
         Strategy:
           T = shortest_path_length(source → target in G_p)
               + len(blocked_path)   ← slack to clear each blocker
-              + 1                   ← safety margin
 
         Falls back to len(blocked_path) + 2 when pg is unavailable.
         """
         if self.time_horizon is not None:
             return self.time_horizon
 
-        slack = len(window.blocked_path) + 1
+        slack = len(window.blocked_path)
 
         G = getattr(pg, "graph", None)
         if G is None:
-            return slack + 1
+            return slack + 2
 
         try:
             sp_len = nx.shortest_path_length(G, window.source, window.target)
         except (nx.NetworkXNoPath, nx.NodeNotFound):
-            sp_len = slack
+            sp_len = max(slack, 1)
 
         T = sp_len + slack
         return max(T, 2)   # always at least 2 steps
@@ -405,6 +405,54 @@ class QUBOFormulator:
                             continue
                         w_label = var_map[key_w_t1]
                         bqm.add_interaction(v_label, w_label, lambda_)
+
+    def _add_crossing_penalty(
+        self,
+        bqm: dimod.BinaryQuadraticModel,
+        var_map: Dict,
+        window: WindowInfo,
+        pg: Any,
+        T: int,
+        lambda_: float,
+    ) -> None:
+        """
+        Add H_crossing: penalize anti-crossing / simultaneous swap moves:
+        Ion i moving u -> v at step t while Ion j moves v -> u at step t (i != j).
+        Uses Rosenberg product substitution for m1 = x_{i,u,t} * x_{i,v,t+1} and
+        m2 = x_{j,v,t} * x_{j,u,t+1}, then adds interaction +λ * m1 * m2.
+        """
+        G = getattr(pg, "graph", None)
+        ions = list(window.active_ions.keys())
+        positions = list(window.window_nodes)
+
+        for i, j in itertools.combinations(ions, 2):
+            for t in range(T):
+                for u in positions:
+                    for v in positions:
+                        if u == v:
+                            continue
+                        if G is not None and not (G.has_edge(u, v) or G.has_edge(v, u)):
+                            continue
+
+                        k_i_u_t  = (i, u, t)
+                        k_i_v_t1 = (i, v, t + 1)
+                        k_j_v_t  = (j, v, t)
+                        k_j_u_t1 = (j, u, t + 1)
+
+                        if (
+                            k_i_u_t in var_map
+                            and k_i_v_t1 in var_map
+                            and k_j_v_t in var_map
+                            and k_j_u_t1 in var_map
+                        ):
+                            lbl_i1 = var_map[k_i_u_t]
+                            lbl_i2 = var_map[k_i_v_t1]
+                            lbl_j1 = var_map[k_j_v_t]
+                            lbl_j2 = var_map[k_j_u_t1]
+
+                            m1 = self._rosenberg_product(bqm, lbl_i1, lbl_i2, lambda_)
+                            m2 = self._rosenberg_product(bqm, lbl_j1, lbl_j2, lambda_)
+                            bqm.add_interaction(m1, m2, lambda_)
 
     def _add_goal_penalty(
         self,
