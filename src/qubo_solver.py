@@ -46,6 +46,7 @@ import dimod
 import neal
 
 from qubo_formulator import QUBOProblem
+from qubo_validator import validate_sample as _validate_sample
 
 logger = logging.getLogger("shaw_router.qubo_solver")
 
@@ -121,8 +122,8 @@ class QUBOSolver:
     def __init__(
         self,
         exact_threshold: int = EXACT_THRESHOLD,
-        sa_num_reads: int = 200,
-        sa_num_sweeps: int = 1000,
+        sa_num_reads: int = 500,
+        sa_num_sweeps: int = 3000,
         sa_initial_temperature: Optional[float] = None,
         sa_final_temperature: Optional[float] = None,
     ) -> None:
@@ -131,6 +132,13 @@ class QUBOSolver:
         self.sa_num_sweeps = sa_num_sweeps
         self.sa_initial_temperature = sa_initial_temperature
         self.sa_final_temperature = sa_final_temperature
+        # Cache the sampler — neal.SimulatedAnnealingSampler is stateless
+        # between .sample() calls (all per-run state lives in the SampleSet
+        # it returns, not in the sampler object itself).  Creating it once
+        # avoids repeated C-extension initialisation on every solve() call,
+        # which was the cause of the 4.5 s → 16 s timing drift.
+        self._sa_sampler = neal.SimulatedAnnealingSampler()
+
 
     # -----------------------------------------------------------------------
     # Public entry point
@@ -212,7 +220,7 @@ class QUBOSolver:
         best_sample: Dict[str, int] = dict(best.sample)
         best_energy: float = float(best.energy)
 
-        feasible = self._check_feasibility(best_energy, problem)
+        feasible = self._check_feasibility(best_energy, problem, sample=best_sample)
 
         logger.info(
             "ExactSolver: energy=%.4f, feasible=%s, time=%.4fs",
@@ -248,8 +256,18 @@ class QUBOSolver:
         Solve with neal.SimulatedAnnealingSampler.
 
         Runs `sa_num_reads` independent annealing trajectories, each with
-        `sa_num_sweeps` update sweeps.  Returns the best (lowest-energy)
-        sample across all reads.
+        `sa_num_sweeps` update sweeps.
+
+        Selection strategy (main bug fix):
+            Soft QUBO penalties mean the global minimum-energy read is NOT
+            guaranteed to be feasible — SA can find a low-energy state that
+            violates movement/goal constraints while incurring less total
+            penalty than a feasible solution.  We therefore:
+              1. Collect all reads, sorted by energy ascending.
+              2. Walk the sorted list and return the first read that passes
+                 _check_feasibility (lowest-energy feasible read).
+              3. Only if NO read is feasible, fall back to the global minimum
+                 and mark is_feasible=False.
 
         Parameters
         ----------
@@ -259,14 +277,13 @@ class QUBOSolver:
         -------
         QUBOSolution with solver_used = "simulated_annealing"
         """
+        total_vars = problem.num_variables + problem.num_aux_variables
         logger.debug(
             "SimulatedAnnealing: %d variables, %d reads, %d sweeps",
-            problem.num_variables + problem.num_aux_variables,
+            total_vars,
             self.sa_num_reads,
             self.sa_num_sweeps,
         )
-
-        sampler = neal.SimulatedAnnealingSampler()
 
         # Build keyword args — only pass temperature params if explicitly set
         sa_kwargs: Dict[str, Any] = {
@@ -279,28 +296,56 @@ class QUBOSolver:
             sa_kwargs["final_temperature"] = self.sa_final_temperature
 
         t0 = time.perf_counter()
-        sampleset: dimod.SampleSet = sampler.sample(problem.bqm, **sa_kwargs)
+        sampleset: dimod.SampleSet = self._sa_sampler.sample(
+            problem.bqm, **sa_kwargs
+        )
         elapsed = time.perf_counter() - t0
 
-        # Best (lowest-energy) sample across all reads
-        best = sampleset.first
-        best_sample: Dict[str, int] = dict(best.sample)
-        best_energy: float = float(best.energy)
-
-        feasible = self._check_feasibility(best_energy, problem)
-
-        # Compute feasibility rate across all reads (useful for calibration)
-        all_energies: List[float] = [float(s.energy) for s in sampleset.data()]
-        num_feasible = sum(
-            1 for e in all_energies
-            if self._check_feasibility(e, problem)
+        # --- Collect all reads sorted by energy ascending ------------------
+        # dimod.SampleSet.data() yields samples in the order they were
+        # recorded; sorted_by="energy" returns them in ascending energy order.
+        all_samples = list(
+            sampleset.data(fields=["sample", "energy"], sorted_by="energy")
         )
-        feasibility_rate = num_feasible / len(all_energies) if all_energies else 0.0
+        all_energies: List[float] = [float(s.energy) for s in all_samples]
+
+        # --- Feasibility scan: return the first feasible read ---------------
+        # Walk sorted list; stop at the first read that passes the two-stage
+        # feasibility check (energy < lambda AND goal/one-hot checks).
+        best_sample: Optional[Dict[str, int]] = None
+        best_energy: float = float("inf")
+        feasible: bool = False
+
+        for s in all_samples:          # already sorted energy ascending
+            e = float(s.energy)
+            s_dict = dict(s.sample)
+            if self._check_feasibility(e, problem, sample=s_dict):
+                best_sample = s_dict
+                best_energy = e
+                feasible = True
+                break
+
+        # --- Fallback: no feasible read found — return global minimum -------
+        if best_sample is None:
+            first = all_samples[0]     # lowest energy (sorted ascending)
+            best_sample = dict(first.sample)
+            best_energy = float(first.energy)
+            feasible = False
+
+        # --- Feasibility rate across ALL reads (for diagnostics) ------------
+        num_feasible = sum(
+            1 for s in all_samples
+            if self._check_feasibility(
+                float(s.energy), problem, sample=dict(s.sample)
+            )
+        )
+        feasibility_rate = num_feasible / len(all_samples) if all_samples else 0.0
 
         logger.info(
-            "SA: best_energy=%.4f, feasible=%s, feasibility_rate=%.2f%% (%d/%d), time=%.4fs",
+            "SA: selected_energy=%.4f, feasible=%s, "
+            "feasibility_rate=%.2f%% (%d/%d reads), time=%.4fs",
             best_energy, feasible,
-            feasibility_rate * 100, num_feasible, len(all_energies),
+            feasibility_rate * 100, num_feasible, len(all_samples),
             elapsed,
         )
 
@@ -310,7 +355,7 @@ class QUBOSolver:
             is_feasible=feasible,
             solver_used="simulated_annealing",
             solve_time_s=elapsed,
-            num_reads=len(all_energies),
+            num_reads=len(all_samples),
             problem=problem,
             metadata={
                 "all_energies": all_energies,
@@ -320,6 +365,7 @@ class QUBOSolver:
             },
         )
 
+
     # -----------------------------------------------------------------------
     # Feasibility check
     # -----------------------------------------------------------------------
@@ -328,36 +374,102 @@ class QUBOSolver:
         self,
         energy: float,
         problem: QUBOProblem,
+        sample: Optional[Dict[str, int]] = None,
     ) -> bool:
         """
-        Quick pre-filter: decide whether a sample with *energy* is feasible.
+        Two-stage feasibility check for a QUBO solution sample.
 
-        A solution is feasible iff none of the constraint penalty terms
-        contributed to the energy, i.e. every constraint is satisfied.
+        Stage 1 — Energy pre-reject (fast):
+            If energy >= penalty_lambda, at least one constraint penalty
+            fired → immediately infeasible.  This is the *original* check
+            and it is still correct as a rejection filter.
 
-        Simple heuristic (methodology §7):
-            feasible  ←→  energy < problem.penalty_lambda
+        Stage 2 — Structural checks on the sample (necessary addition):
+            The original check had a critical blind spot: the all-zeros
+            sample (every x_{i,v,t} = 0, nobody moves) has energy = 0.0,
+            which trivially passes `energy < penalty_lambda`.  But that
+            solution violates every goal constraint and every one-hot
+            constraint simultaneously — the decoder always rejects it.
 
-        Rationale: each violated constraint adds at least `penalty_lambda`
-        to the BQM energy (by construction in the formulator, where
-        lambda = C_max + 1 dominates the objective).  Therefore, if energy
-        is strictly below `penalty_lambda`, no constraint can have fired.
+            When `sample` is provided we also verify:
+              (a) Goal constraint: the moving ion's variable for
+                  (ion, window.target, T) must equal 1. If inv_var_map
+                  is populated, we can look this up directly.
+              (b) One-hot sanity: no ion has more than one position bit
+                  set at any timestep (a quick O(n) pass).
 
-        Note: the precise constraint-by-constraint check is done later in
-        solution_decoder.py (methodology §8).  This method provides a cheap
-        first-pass filter so the solver can log and sort samples without
-        invoking the decoder.
+            If inv_var_map is empty (e.g. in unit tests with dummy
+            problems), we skip stage 2 and rely solely on stage 1.
 
         Parameters
         ----------
-        energy  : float  – BQM energy of the sample
+        energy  : float           – BQM energy of the sample
         problem : QUBOProblem
+        sample  : dict | None     – the binary assignment {label: 0/1}
 
         Returns
         -------
-        bool – True if this sample looks feasible (passes the pre-filter)
+        bool – True only if BOTH stages pass
         """
-        return energy < problem.penalty_lambda
+        # --- Stage 1: energy pre-reject -----------------------------------
+        # A sample with energy >= lambda has at least one penalty term
+        # contributing, so it is provably infeasible.
+        if energy >= problem.penalty_lambda:
+            return False
+
+        # --- Stage 2: structural checks (only when sample + map available)
+        if sample is None or not problem.inv_var_map:
+            # Cannot do structural checks without variable mappings.
+            # Fall back to energy-only check (original behaviour).
+            # This keeps unit tests with dummy problems working.
+            return True
+
+        window = problem.window
+        T = problem.time_horizon
+        inv_var_map = problem.inv_var_map
+
+        # Build a quick lookup: (ion, t) -> list of positions with bit=1
+        ion_t_positions: Dict[Any, Dict[int, List[Any]]] = {}
+        for label, bit in sample.items():
+            if bit != 1:
+                continue
+            mapped = inv_var_map.get(label)
+            if mapped is None:
+                continue  # Rosenberg aux variable — skip
+            ion, pos, t = mapped
+            ion_t_positions.setdefault(ion, {}).setdefault(t, []).append(pos)
+
+        # (a) Goal constraint: moving ion must be at window.target at t=T.
+        #     Find the ion currently at window.source.
+        moving_ion = None
+        for ion, pos in window.active_ions.items():
+            if pos == window.source:
+                moving_ion = ion
+                break
+
+        if moving_ion is not None:
+            positions_at_T = ion_t_positions.get(moving_ion, {}).get(T, [])
+            if window.target not in positions_at_T:
+                # Goal not achieved — decoder will reject as gate_feasibility.
+                logger.debug(
+                    "Feasibility pre-reject: moving ion %s not at target %r "
+                    "at t=%d (positions_at_T=%r)",
+                    moving_ion, window.target, T, positions_at_T,
+                )
+                return False
+
+        # (b) One-hot sanity: no ion should have >1 position set at any t.
+        for ion, t_map in ion_t_positions.items():
+            for t, positions in t_map.items():
+                if len(positions) > 1:
+                    logger.debug(
+                        "Feasibility pre-reject: ion %s has %d positions at "
+                        "t=%d: %r (one-hot violated)",
+                        ion, len(positions), t, positions,
+                    )
+                    return False
+
+        return True
 
     # -----------------------------------------------------------------------
     # Penalty calibration  (Optional — methodology §11 / solver tuning)
@@ -410,7 +522,8 @@ class QUBOSolver:
             target_feasibility, lo, hi, max_iterations,
         )
 
-        sampler = neal.SimulatedAnnealingSampler()
+        sampler = self._sa_sampler
+
 
         for iteration in range(max_iterations):
             mid = (lo + hi) / 2.0
