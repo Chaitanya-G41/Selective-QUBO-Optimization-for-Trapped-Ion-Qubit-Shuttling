@@ -85,7 +85,33 @@ def test_original_gates_preserved_in_order():
         )
 
 
+def test_estimate_walk_markers_matches_execution():
+    """The dry-run estimator must predict exactly what _walk_path emits:
+    clear hops cost 1 marker each; a blocked hop costs a 2-marker
+    vacate when the trap has slack. The selective-QUBO acceptance gate
+    compares these estimates, so drift here means wrong accept/reject."""
+    pg = build_linear_qccd(num_traps=2, trap_capacity=2)
+    placement = Placement(pg)
+    placement.place(0, pg.slots_of("t0")[0])
+
+    clear_path = pg.shortest_path("t0:0", "t1:1")
+    assert ShawRoutingPass._estimate_walk_markers(
+        pg, placement, clear_path, 0
+    ) == len(clear_path) - 1  # all free: one marker per hop
+
+    # Block a trap slot whose trap still has slack: the walk must
+    # shuffle the occupant aside first (2 markers) instead of a plain
+    # hop (1 marker). (Blocking a segment would swap instead, which
+    # costs the same single marker -- not what this asserts.)
+    placement.place(1, "t1:0")
+    assert "t1:0" in clear_path
+    assert ShawRoutingPass._estimate_walk_markers(
+        pg, placement, clear_path, 0
+    ) > len(clear_path) - 1  # vacate shuffle costs extra markers
+
+
 if __name__ == "__main__":
     test_routing_runs_clean_and_inserts_movement()
     test_original_gates_preserved_in_order()
+    test_estimate_walk_markers_matches_execution()
     print("shaw_routing_pass: all tests passed")

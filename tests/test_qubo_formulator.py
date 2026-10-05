@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from position_graph import build_linear_qccd, Placement
-from congestion_handler import CongestionHandler
+from congestion_handler import CongestionHandler, WindowInfo
 from qubo_formulator import QUBOFormulator, QUBOProblem
 
 
@@ -103,6 +103,79 @@ def test_anti_crossing_penalty_added():
     # Anti-crossing produces aux variables for move pairs
     assert problem.num_aux_variables >= 0
     assert len(problem.bqm.variables) >= problem.num_variables
+
+
+def _full_sample(problem, assignment):
+    """Complete sample dict: every BQM variable (primaries + Rosenberg
+    aux) 0 except assigned ones (=1). Aux at 0 contributes nothing for
+    products whose inputs never co-fire; for a firing crossing product
+    it contributes exactly its +lambda*ab term -- which is the penalty
+    under test."""
+    sample = {label: 0 for label in problem.bqm.variables}
+    for key in assignment:
+        sample[problem.var_map[key]] = 1
+    return sample
+
+
+def test_crossing_penalty_fires_on_swap():
+    """A simultaneous position swap must cost >= lambda more than the
+    identical trajectories without the swap. Both samples keep one-hot,
+    capacity, movement-legality and goal terms equal, so any gap at or
+    above lambda can only come from the crossing penalty."""
+    pg = build_linear_qccd(num_traps=2, trap_capacity=2)
+    window = WindowInfo(
+        window_nodes=frozenset({"t0:0", "t0:1", "seg0", "t1:0"}),
+        active_ions={0: "t0:0", 1: "t0:1"},
+        obstacle_ions={},
+        source="t0:0",
+        target="t1:0",
+        blocked_path=["seg0"],
+        center_nodes=["seg0"],
+        radius=1,
+        size_capped=False,
+    )
+    problem = QUBOFormulator(time_horizon=2).build(window, pg)
+    lam = problem.penalty_lambda
+
+    parked = _full_sample(problem, [
+        (0, "t0:0", 0), (0, "t0:0", 1), (0, "t0:0", 2),
+        (1, "t0:1", 0), (1, "t0:1", 1), (1, "t0:1", 2),
+    ])
+    # Same, except the ions swap spots at t=0->1 and swap back at t=1->2
+    # (both hops along the legal t0:0<->t0:1 swap edge).
+    swapped = _full_sample(problem, [
+        (0, "t0:0", 0), (0, "t0:1", 1), (0, "t0:0", 2),
+        (1, "t0:1", 0), (1, "t0:0", 1), (1, "t0:1", 2),
+    ])
+    gap = problem.bqm.energy(swapped) - problem.bqm.energy(parked)
+    assert gap >= lam, (
+        f"crossing swap should cost >= lambda ({lam}), got gap={gap}"
+    )
+
+
+def test_progress_reward_pulls_mover_to_target():
+    """Shaping must make the target strictly more attractive than the
+    start for the mover (a pull SA can follow stepwise). Uses an
+    explicit lambda so the assertion doesn't depend on auto-scaling."""
+    pg = build_linear_qccd(num_traps=2, trap_capacity=2)
+    window = WindowInfo(
+        window_nodes=frozenset({"t0:0", "t0:1", "seg0", "t1:0"}),
+        active_ions={0: "t0:0", 1: "t0:1"},
+        obstacle_ions={},
+        source="t0:0",
+        target="t1:0",
+        blocked_path=["seg0"],
+        center_nodes=["seg0"],
+        radius=1,
+        size_capped=False,
+    )
+    problem = QUBOFormulator(time_horizon=2, penalty_lambda=10.0).build(window, pg)
+    t = 1
+    bias_target = problem.bqm.linear[problem.var_map[(0, "t1:0", t)]]
+    bias_source = problem.bqm.linear[problem.var_map[(0, "t0:0", t)]]
+    assert bias_target < bias_source, (
+        f"target bias ({bias_target}) should beat source bias ({bias_source})"
+    )
 
 
 if __name__ == "__main__":

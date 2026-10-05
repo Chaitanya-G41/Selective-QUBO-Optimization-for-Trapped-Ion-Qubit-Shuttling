@@ -420,8 +420,57 @@ def test_no_pg_returns_path():
 
 
 # ---------------------------------------------------------------------------
+# 18. greedy SA seed validity (warm-start for _try_qubo_solve)
+# ---------------------------------------------------------------------------
+
+def test_greedy_seed_is_one_hot_valid():
+    """The warm-start seed must be a complete, one-hot-valid assignment
+    (exactly one 1 per ion per timestep), with the mover walking the
+    static shortest path and everyone else frozen at start."""
+    from qubo_formulator import QUBOFormulator
+
+    pg, pl = _make_3trap_pg_and_placement()
+    pl.place(2, pg.slots_of("t1")[0])  # blocker on the t0->t2 path
+    path = pg.shortest_path(pg.slots_of("t0")[0], pg.slots_of("t2")[0])
+    handler = CongestionHandler()
+    blocked = handler._detect_blockages(path, pl)
+    window = handler.extract_window(path, blocked, pl, pg)
+    problem = QUBOFormulator().build(window, pg)
+
+    seed = handler._greedy_seed_sample(problem, pg)
+    assert seed is not None
+    # Complete: every BQM variable (primaries + aux) assigned, since
+    # neal rejects initial_states that don't match bqm.variables.
+    assert set(seed.keys()) == set(problem.bqm.variables)
+    assert set(seed.values()) <= {0, 1}
+    # One-hot per (ion, timestep).
+    T = problem.time_horizon
+    for ion in window.active_ions:
+        for t in range(T + 1):
+            ones = [
+                pos for pos in window.window_nodes
+                if (ion, pos, t) in problem.var_map
+                and seed[problem.var_map[(ion, pos, t)]] == 1
+            ]
+            assert len(ones) == 1, f"ion {ion} t={t}: {ones}"
+    # Mover starts at source and ends at target (T covers the walk).
+    inv = problem.inv_var_map
+    by_ion_t = {}
+    for label, bit in seed.items():
+        if bit == 1 and label in inv:
+            ion, pos, t = inv[label]
+            by_ion_t.setdefault((ion, t), []).append(pos)
+    assert by_ion_t[(0, 0)] == [pg.slots_of("t0")[0]]
+    last_t = max(t for (ion, t) in by_ion_t if ion == 0)
+    assert by_ion_t[(0, last_t)] == [window.target]
+
+
+# ---------------------------------------------------------------------------
 # Standalone runner
 # ---------------------------------------------------------------------------
+# NOTE: the Laya advisory-gate tests lived here and were removed with
+# the gate before commit (R&D, saved at /tmp/laya_backup/ + /tmp/laya_ft/).
+# Re-adding the gate? Restore those tests from the backup too.
 
 if __name__ == "__main__":
     tests = [
@@ -449,6 +498,7 @@ if __name__ == "__main__":
         test_summary_no_calls,
         test_summary_after_calls,
         test_no_pg_returns_path,
+        test_greedy_seed_is_one_hot_valid,
     ]
     passed = failed = 0
     for t in tests:

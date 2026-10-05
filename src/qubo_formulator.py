@@ -170,8 +170,9 @@ class QUBOFormulator:
         self._add_crossing_penalty(bqm, var_map, window, pg, T, lambda_)
         self._add_goal_penalty(bqm, var_map, window, T, lambda_)
 
-        # 6. Add cost objective
+        # 6. Add cost objective + progress shaping
         self._add_cost_objective(bqm, var_map, window, T)
+        self._add_progress_reward(bqm, var_map, window, pg, T, lambda_)
 
         # 7. Rosenberg quadratization aux variable tracking
         num_aux = self._rosenberg_quadratize(bqm)
@@ -376,7 +377,15 @@ class QUBOFormulator:
     ) -> None:
         """
         Add H_movement: penalize moves between non-adjacent positions:
-        +λ * x_{i,v,t} * x_{i,w,t+1} for (v, w) not in E(G_p) with v ≠ w.
+        +2λ * x_{i,v,t} * x_{i,w,t+1} for (v, w) not in E(G_p) with v ≠ w.
+
+        The 2λ weight (not λ) is load-bearing: a single illegal hop
+        must cost more than the goal bonus (λ) plus any saved hop
+        costs (≤ T·hop_cost) combined -- otherwise SA "teleports" the
+        mover on the last step (one +λ violation pays for itself via
+        the -λ goal bonus) and the decoder rejects on
+        movement_legality. With auto-scaled λ = C_max + 1 ≥ T·hop_cost,
+        2λ provably prices out the teleport (observed failure mode).
         """
         G = getattr(pg, "graph", None)
         ions      = list(window.active_ions.keys())
@@ -404,7 +413,72 @@ class QUBOFormulator:
                         if key_w_t1 not in var_map:
                             continue
                         w_label = var_map[key_w_t1]
-                        bqm.add_interaction(v_label, w_label, lambda_)
+                        bqm.add_interaction(v_label, w_label, 2.0 * lambda_)
+
+    def _add_crossing_penalty(
+        self,
+        bqm: dimod.BinaryQuadraticModel,
+        var_map: Dict,
+        window: WindowInfo,
+        pg: Any,
+        T: int,
+        lambda_: float,
+    ) -> None:
+        """
+        Add H_cross: penalize two ions swapping positions in one step.
+
+        A crossing (ion a: u→v while ion b: v→u at the same t) is an
+        implicit swap with no explicit swap gate and is always rejected
+        downstream by solution_decoder -- but without a BQM term pricing
+        it, the sampler returns "feasible" energies for physically
+        useless crossing samples (observed: every SA sample rejected on
+        collision_avoidance regardless of budget). Per (t, edge, pair):
+
+            +λ * x_{a,u,t} * x_{a,v,t+1} * x_{b,v,t} * x_{b,u,t+1}
+
+        plus the mirror direction. Quartic terms are reduced through
+        the shared _rosenberg_product helper (cached per pair). Edges
+        are treated undirected (matching _add_movement_penalty).
+        """
+        G = getattr(pg, "graph", None)
+        if G is None:
+            return
+        ions = list(window.active_ions.keys())
+        # Undirected edges, each considered once (frozenset is
+        # hashable for both str slot IDs and tuple virtual slots).
+        edges = {frozenset((u, v)) for u, v in G.edges() if u != v}
+
+        for t in range(T):
+            for edge in edges:
+                u, v = tuple(edge)
+                for a, b in itertools.combinations(ions, 2):
+                    # Direction 1: a goes u→v while b goes v→u.
+                    self._penalize_crossing(bqm, var_map, a, u, v, b, t, lambda_)
+                    # Direction 2: the mirror (a: v→u while b: u→v).
+                    self._penalize_crossing(bqm, var_map, b, u, v, a, t, lambda_)
+
+    def _penalize_crossing(
+        self,
+        bqm: dimod.BinaryQuadraticModel,
+        var_map: Dict,
+        a: Any, u: Any, v: Any, b: Any,
+        t: int,
+        lambda_: float,
+    ) -> None:
+        """
+        One directed crossing term: +λ if (a: u→v AND b: v→u at step
+        t→t+1), via two Rosenberg products p1 ≡ a_u_t·a_v_t+1,
+        p2 ≡ b_v_t·b_u_t+1 and +λ on z ≡ p1·p2. Skipped silently if
+        any of the four variables is outside var_map.
+        """
+        keys = [(a, u, t), (a, v, t + 1), (b, v, t), (b, u, t + 1)]
+        if any(k not in var_map for k in keys):
+            return
+        lbl_au_t, lbl_av_t1, lbl_bv_t, lbl_bu_t1 = (var_map[k] for k in keys)
+        p1 = self._rosenberg_product(bqm, lbl_au_t, lbl_av_t1, lambda_)
+        p2 = self._rosenberg_product(bqm, lbl_bv_t, lbl_bu_t1, lambda_)
+        z = self._rosenberg_product(bqm, p1, p2, lambda_)
+        bqm.add_variable(z, lambda_)
 
     def _add_crossing_penalty(
         self,
@@ -506,6 +580,67 @@ class QUBOFormulator:
                     key = (ion, pos, t)
                     if key in var_map:
                         bqm.add_variable(var_map[key], self.hop_cost)
+
+    def _add_progress_reward(
+        self,
+        bqm: dimod.BinaryQuadraticModel,
+        var_map: Dict,
+        window: WindowInfo,
+        pg: Any,
+        T: int,
+        lambda_: float,
+    ) -> None:
+        """
+        Add H_progress: potential-based shaping that rewards the mover
+        for being closer to the target at EVERY timestep (not just at
+        t=T like H_goal): linear bias -w*(D0 - d) on x_{mover,pos,t},
+        where d = dist(pos, target) and D0 = dist(source, target).
+
+        This is potential shaping (reward ∝ Φ(s) with Φ = -distance),
+        so it guides SA step-by-step toward the target without changing
+        which full walk is optimal: any detour still pays hop_cost per
+        step and arrives later. Weight w = λ/((T+1)*(Dmax+1)) keeps the
+        total shaping below λ, so it can never outweigh a single hard
+        constraint -- it only breaks ties between valid walks and, more
+        importantly, gives blind SA a gradient to follow. Without this
+        term SA parks everyone (zero cost, zero guidance) and the
+        decoder rejects on gate_feasibility forever (observed).
+        """
+        G = getattr(pg, "graph", None)
+        if G is None:
+            return
+        moving_ion = None
+        for ion, pos in window.active_ions.items():
+            if pos == window.source:
+                moving_ion = ion
+                break
+        if moving_ion is None:
+            return
+
+        def dist(a: Any, b: Any) -> Optional[int]:
+            try:
+                return nx.shortest_path_length(G, a, b)
+            except (nx.NetworkXNoPath, nx.NodeNotFound):
+                return None
+
+        D0 = dist(window.source, window.target)
+        if D0 is None:
+            return
+        dists: Dict[Any, int] = {}
+        for pos in window.window_nodes:
+            d = dist(pos, window.target)
+            if d is not None:
+                dists[pos] = d
+        if not dists:
+            return
+        Dmax = max(dists.values())
+        w = lambda_ / ((T + 1) * (Dmax + 1))
+
+        for pos, d in dists.items():
+            for t in range(T + 1):
+                k = (moving_ion, pos, t)
+                if k in var_map:
+                    bqm.add_variable(var_map[k], -w * (D0 - d))
 
     def _rosenberg_quadratize(
         self,

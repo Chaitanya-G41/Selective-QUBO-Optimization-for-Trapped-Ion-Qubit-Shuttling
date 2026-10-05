@@ -286,6 +286,30 @@ def test_accepts_a_valid_better_solution():
     assert pl.position_of(0) == "t1:0"
 
 
+def test_apply_to_placement_skip_ions_leaves_mover():
+    """skip_ions: blockers move per plan, the skipped mover stays put
+    (selective-QUBO hookup walks it separately -- replaying it too
+    would walk it twice)."""
+    decoder = SolutionDecoder()
+    pg = build_linear_qccd(num_traps=3, trap_capacity=2)
+    pl = Placement(pg)
+    pl.place(0, pg.slots_of("t0")[0])
+    pl.place(1, pg.slots_of("t1")[0])
+
+    decoded = DecodedSolution(
+        accepted=True,
+        decoded_path=["t0:0", "t0:1", "seg0", "t1:1"],
+        C_QUBO=3, C_heuristic=5, improvement=0.4, violation=None,
+        trajectories={
+            0: ["t0:0", "t0:1", "seg0", "t1:1"],
+            1: ["t1:0", "t1:0", "t1:0", "t1:1"],
+        },
+    )
+    decoder.apply_to_placement(decoded, pl, pg, skip_ions=frozenset({0}))
+    assert pl.position_of(0) == "t0:0"  # mover untouched
+    assert pl.position_of(1) == "t1:1"  # blocker followed plan
+
+
 # ---------------------------------------------------------------------------
 # apply_to_placement raise-paths
 # ---------------------------------------------------------------------------
@@ -368,6 +392,47 @@ def test_apply_to_placement_raises_on_rotation_deadlock():
     )
     with pytest.raises(ValueError, match="deadlocked"):
         decoder.apply_to_placement(decoded, pl, pg)
+
+
+def test_rejects_degenerate_single_node_path():
+    """A sample whose mover trajectory collapses to one position must
+    be rejected as empty_path -- never accepted with C_QUBO=0 (a
+    zero-hop 'solution' claiming 100% improvement routes nothing).
+    Observed live from SA samples before this guard existed."""
+    from qubo_formulator import QUBOProblem
+    from qubo_solver import QUBOSolution
+
+    decoder = SolutionDecoder()
+    pg = build_linear_qccd(num_traps=2, trap_capacity=2)
+    pl = Placement(pg)
+    pl.place(0, pg.slots_of("t0")[0])
+
+    window = WindowInfo(
+        window_nodes=frozenset({"t0:0", "seg0", "t1:0"}),
+        active_ions={0: "t0:0"},
+        obstacle_ions={},
+        source="t0:0",
+        target="t1:0",
+        blocked_path=["seg0"],
+        center_nodes=["seg0"],
+        radius=1,
+        size_capped=False,
+    )
+    # Mover "already" at the target for the whole episode: every check
+    # passes (no moves at all), but the extracted path is one node.
+    inv_var_map = {f"x_0_t10_{t}": (0, "t1:0", t) for t in range(3)}
+    problem = QUBOProblem(
+        bqm=None, var_map={}, inv_var_map=inv_var_map,
+        num_variables=3, num_aux_variables=0, time_horizon=2,
+        penalty_lambda=10.0, window=window,
+    )
+    solution = QUBOSolution(
+        sample={k: 1 for k in inv_var_map}, energy=1.0, is_feasible=True,
+        solver_used="exact", solve_time_s=0.01, num_reads=1, problem=problem,
+    )
+    decoded = decoder.decode_and_validate(solution, pl, pg)
+    assert decoded.accepted is False
+    assert decoded.violation == "empty_path"
 
 
 if __name__ == "__main__":

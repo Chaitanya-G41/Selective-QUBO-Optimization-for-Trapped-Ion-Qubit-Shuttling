@@ -4,16 +4,13 @@ test_qccd_adapter.py
 Two things worth proving about the adapter:
 
   1. ShawRoutingPass runs *unmodified* against a real qccd
-     PositionGraph via the adapter -- on LinearChain here (Grid and
-     Junction are covered by the deadlock test below instead, since at
-     the small sizes used in these tests they run out of slack
-     capacity for this particular circuit -- see test 2).
+     PositionGraph via the adapter -- on LinearChain here.
 
-  2. When a topology genuinely doesn't have enough spare capacity to
-     ever co-locate two qudits (no congestion/eviction logic exists
-     yet to free them up), the pass raises a clear RuntimeError
-     instead of spinning forever. This was a real bug caught while
-     building this adapter -- worth a regression test on its own.
+  2. The same circuit on a tight 2x2 Grid -- which used to deadlock
+     with a clear RuntimeError -- now routes end-to-end via
+     single-level eviction (a parked bystander is relocated, then the
+     gate retries). The deadlock guard itself is still covered by the
+     eviction-proof remainders elsewhere in the suite.
 """
 
 import asyncio
@@ -23,7 +20,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))          # repo root, for `qccd`
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))  # for qccd_adapter, shaw_routing_pass
 
-import pytest
 from bqskit.compiler.passdata import PassData
 from bqskit.ir.circuit import Circuit
 from bqskit.ir.gates import CNOTGate, HGate
@@ -60,29 +56,20 @@ def test_shaw_runs_unmodified_on_qccd_linear_chain():
     assert gate_names.count("CNOTGate") == 3  # all 3 original CNOTs survived
 
 
-def test_capacity_deadlock_raises_instead_of_hanging():
+def test_tight_grid_routes_via_eviction():
     # A small 2x2 grid (4 traps, capacity 2 each = 8 slots for 4 ions)
-    # has plenty of *total* capacity, but not enough *local* slack for
-    # this specific circuit/seeding without real congestion resolution
-    # (eviction/rerouting) -- which doesn't exist yet. This should
-    # fail fast with a clear error, not hang.
+    # used to deadlock here: no local slack for this circuit/seeding.
+    # Single-level eviction relocates a parked bystander and retries,
+    # so the same circuit now routes with all original gates intact.
     qccd_graph = GridArchitecture.build(rows=2, cols=2, trap_capacity=2)
-    with pytest.raises(RuntimeError, match="Routing deadlock"):
-        asyncio.run(_run(qccd_graph))
+    routed_circuit = asyncio.run(_run(qccd_graph))
+
+    gate_names = [op.gate.name for op in routed_circuit.operations()]
+    assert "HGate" in gate_names
+    assert gate_names.count("CNOTGate") == 3  # all 3 original CNOTs survived
 
 
 if __name__ == "__main__":
     test_shaw_runs_unmodified_on_qccd_linear_chain()
-    try:
-        test_capacity_deadlock_raises_instead_of_hanging()
-    except NameError:
-        # pytest.raises unavailable when run standalone without pytest;
-        # fall back to a manual check so `python test_qccd_adapter.py`
-        # still works without pytest installed.
-        qccd_graph = GridArchitecture.build(rows=2, cols=2, trap_capacity=2)
-        try:
-            asyncio.run(_run(qccd_graph))
-            raise AssertionError("expected a RuntimeError deadlock, got none")
-        except RuntimeError as e:
-            assert "Routing deadlock" in str(e)
+    test_tight_grid_routes_via_eviction()
     print("qccd_adapter: all tests passed")

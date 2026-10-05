@@ -78,6 +78,10 @@ logger = logging.getLogger("shaw_router.congestion")
 # ---------------------------------------------------------------------------
 # Data containers
 # ---------------------------------------------------------------------------
+# NOTE: an optional Laya System-One advisory gate lived here (lazy router
+# cache + fixed trigger question + fail-open ask helper). Removed before
+# commit to keep this R&D out of the shared tree; full code saved at
+# /tmp/laya_backup/ for one-step re-adding later.
 
 @dataclass
 class CongestionMetrics:
@@ -159,6 +163,16 @@ class CongestionHandler:
     window_radius    : int    BFS radius for window extraction (default 1)
     window_max_size  : int    |W| upper bound (default 20)
     max_reroute_candidates : int  how many alternative paths to try (default 8)
+    required_margin  : int    accept a decoded path only if
+        C_heuristic - C_QUBO >= required_margin (default 2, measured:
+        margin-1 accepts routinely tie or lose after walk-execution
+        turbulence eats their ~1-hop on-paper saving, while margin-2
+        keeps the decisive wins and drops the poisoned ones).
+        Higher margins filter marginal accepts whose walk-execution
+        turbulence (vacates, re-routing from new positions) eats the
+        on-paper saving.
+    (No Laya parameters: the advisory gate was removed before commit;
+    full code saved at /tmp/laya_backup/ for one-step re-adding later.)
     """
 
     def __init__(
@@ -169,6 +183,7 @@ class CongestionHandler:
         window_radius: int = 1,
         window_max_size: int = 20,
         max_reroute_candidates: int = 8,
+        required_margin: int = 2,
     ) -> None:
         self.kappa_threshold = kappa_threshold
         self.rho_threshold = rho_threshold
@@ -176,6 +191,13 @@ class CongestionHandler:
         self.window_radius = window_radius
         self.window_max_size = window_max_size
         self.max_reroute_candidates = max_reroute_candidates
+        self.required_margin = required_margin
+        # SA draw counter: each triggered solve gets a distinct but
+        # deterministic seed, so routes are reproducible run to run
+        # (same circuit + same handler settings = same routing).
+        # Without this, verdict benchmarking is noise-chasing: SA luck
+        # swings individual circuits ±10% between identical runs.
+        self._solve_counter = 0
 
         # Running statistics – collected for experimental evaluation (§11)
         self.stats: Dict[str, Any] = {
@@ -183,13 +205,14 @@ class CongestionHandler:
             "clear_paths": 0,        # no blockage at all
             "blocked_events": 0,     # at least one intermediate blocked
             "qubo_triggers": 0,      # severe enough to escalate
-            "qubo_accepted": 0,      # decoded QUBO path applied (best-effort)
+            "qubo_accepted": 0,      # decoded path returned for walking
             "rerouted": 0,           # found a fully clear alternate path
             "greedy_cleared": 0,     # greedy blocker shuffle succeeded
             "unresolved": 0,         # returned original path unchanged
             "kappa_values": [],      # for histogram / calibration
             "rho_values": [],
             "depth_values": [],
+            "accept_margins": [],    # C_heur - C_QUBO per accepted path
             "events": [],            # list[CongestionEvent]
         }
 
@@ -287,27 +310,24 @@ class CongestionHandler:
             self.stats["qubo_triggers"] += 1
             logger.info(
                 "QUBO TRIGGER fired (κ=%.3f > %.3f, ρ=%.3f > %.3f, d=%d > %d). "
-                "Window ready. QUBO solve deferred – using greedy fallback.",
+                "Window ready; attempting selective QUBO solve.",
                 kappa, self.kappa_threshold,
                 rho, self.rho_threshold,
                 depth, self.depth_threshold,
             )
-            # Window is extracted and available in `window`.
-            # The QUBO formulation (Phase 6) will consume `window` in the
-            # next sprint.  For now, fall through to greedy clearing.
-
         # ---- Step 4.5: selective QUBO solve ------------------------------
         # On a trigger, formulate the window, solve it, and decode/
-        # validate the result. An accepted solution is applied to the
-        # live placement and its decoded path returned; anything else
-        # falls through to greedy clearing below. (Imports are
-        # function-level: the qubo modules import WindowInfo from THIS
-        # module, so top-level imports would be circular.)
+        # validate the result. An accepted mover path is returned for
+        # ShawRoutingPass to walk (mover-only execution; blockers are
+        # handled live by the walk) -- anything else falls through to
+        # greedy clearing below. (Imports are function-level: the qubo
+        # modules import WindowInfo from THIS module, so top-level
+        # imports would be circular.)
         resolved_path = path  # default: return original, let _walk_path handle it
         outcome = "unresolved"
 
         if triggered and window is not None and pg is not None:
-            qubo_path = self._try_qubo_solve(window, placement, pg, path)
+            qubo_path = self._try_qubo_solve(window, placement, pg, path, blocked)
             if qubo_path is not None:
                 resolved_path = qubo_path
                 outcome = "qubo_accepted"
@@ -368,23 +388,148 @@ class CongestionHandler:
     # Phase 4.5 – selective QUBO solve (formulate → solve → decode → apply)
     # -----------------------------------------------------------------------
 
+    def _greedy_seed_sample(
+        self,
+        problem: "QUBOProblem",
+        pg: "PositionGraph",
+    ) -> Optional[Dict[str, int]]:
+        """
+        Warm-start seed for SA: the mover walks the static shortest
+        source→target path (then stays); anyone the walk would step on
+        is shoved aside the same step into a free neighbour -- except
+        into the slot the mover just vacated, which would be a swap
+        (crossing) and is skipped. Unshovable collisions stay
+        overlapping. One-hot valid by construction modulo walk steps
+        outside the modelled window (keys without variables). May
+        violate capacity/crossing where shoves fail -- fine for a
+        starting point; SA repairs from a good basin instead of
+        searching blindly. Returns None if no static path exists
+        (caller solves cold). Covers every BQM variable (primaries +
+        Rosenberg aux): neal rejects initial_states that don't match
+        bqm.variables exactly. Aux default 0; SA repairs.
+
+        NOTE (measured): shoving into the mover's vacated slot was
+        tried first and reverted -- that IS a crossing move, so the
+        seed tripped collision_avoidance and started worse than the
+        plain walk-through. Vacancy must never come from the mover's
+        own trail in the same step.
+        """
+        window = problem.window
+        mover = next(
+            (ion for ion, pos in window.active_ions.items()
+             if pos == window.source),
+            None,
+        )
+        if mover is None:
+            return None
+        G = getattr(pg, "graph", None)
+        try:
+            walk = (nx.shortest_path(G, window.source, window.target)
+                    if G is not None else [window.source, window.target])
+        except Exception:
+            return None
+
+        T = problem.time_horizon
+        # traj[ion][t]: forward-built per-ion trajectories. The mover
+        # owns its walk; anyone the walk would step on is shoved aside
+        # THIS step into a free neighbour that is (a) not the slot the
+        # mover just vacated (that would be a swap = crossing, which
+        # the decoder rightly rejects) and (b) not anywhere on the
+        # mover's future walk (parking there just schedules the next
+        # collision). Unshovable collisions stay overlapping, exactly
+        # like the old walk-through seed. One append per ion per step
+        # keeps every trajectory exactly T+1 long by construction, so
+        # one-hot validity can only break where the walk itself leaves
+        # the modelled window (same as before -- those keys simply
+        # have no variables).
+        mover_traj = [walk[min(t, len(walk) - 1)] for t in range(T + 1)]
+        walk_set = set(walk)
+        traj: Dict[Any, List[Any]] = {
+            ion: [start_pos] for ion, start_pos in window.active_ions.items()
+        }
+        for t in range(1, T + 1):
+            mpos, mprev = mover_traj[t], mover_traj[t - 1]
+            traj[mover].append(mpos)
+            taken = {mpos}
+            for ion in window.active_ions:
+                if ion == mover:
+                    continue
+                prev = traj[ion][-1]
+                if prev != mpos:
+                    traj[ion].append(prev)
+                    taken.add(prev)
+                    continue
+                shoved = None
+                if G is not None and prev in G:
+                    for nbr in G.neighbors(prev):
+                        if nbr == mprev or nbr in walk_set:
+                            continue  # swap-back or future collision
+                        if nbr in taken or nbr not in window.window_nodes:
+                            continue
+                        if not (G.has_edge(prev, nbr) or G.has_edge(nbr, prev)):
+                            continue
+                        shoved = nbr
+                        break
+                traj[ion].append(shoved if shoved is not None else prev)
+                taken.add(traj[ion][-1])
+
+        seed: Dict[str, int] = {label: 0 for label in problem.bqm.variables}
+        for ion, positions in traj.items():
+            for t, pos in enumerate(positions):
+                key = (ion, pos, t)
+                if key in problem.var_map:
+                    seed[problem.var_map[key]] = 1
+        return seed
+
+    def _greedy_outcome(
+        self,
+        path: List[Any],
+        blocked: List[Any],
+        placement: "Placement",
+        pg: "PositionGraph",
+    ) -> Tuple[List[Any], str]:
+        """
+        What step 5 (greedy clearing) would return for this path,
+        WITHOUT recording stats or logging: (resolved_path, outcome)
+        where outcome is one of "rerouted" / "greedy_cleared" /
+        "unresolved". Pure except for reads -- safe to call
+        speculatively. Step 5 keeps its own inline copy so its
+        stats/logging behavior is untouched.
+        """
+        alt = self._find_unblocked_path(path[0], path[-1], placement, pg)
+        if alt is not None and alt != path:
+            return alt, "rerouted"
+        shuffled = self._shaw_greedy_clear(path, blocked, placement, pg)
+        if shuffled is not None:
+            return shuffled, "greedy_cleared"
+        return path, "unresolved"
+
     def _try_qubo_solve(
         self,
         window: WindowInfo,
         placement: "Placement",
         pg: "PositionGraph",
         path: List[Any],
+        blocked: List[Any],
     ) -> Optional[List[Any]]:
         """
         Best-effort QUBO resolution for one triggered window. Formulate
         the window, solve it (auto exact/SA), decode + validate the
-        sample, and apply accepted trajectories to the live placement.
+        sample, pre-clear blockers per the accepted trajectories, and
+        return the accepted mover path for ShawRoutingPass to walk with
+        its normal machinery (plus movement markers).
 
-        Returns the decoded path on accept, None on any failure -- the
-        caller falls back to greedy clearing, so a QUBO miss never
-        breaks routing, it just costs the solve time. Anything raising
-        here is caught and logged for the same reason: optimization is
-        best-effort, the heuristic fallback is always safe.
+        Execution is split this way on purpose: replaying every ion's
+        choreography AND then walking the mover moves it twice (once
+        to the target via apply, once backward through the path via
+        the walk -- measured +19% shuttle regressions), while walking
+        alone re-vacates blockers the plan had already parked (2
+        markers per contested hop). Pre-clearing blockers and walking
+        only the mover costs each move once. The joint trajectories
+        are still fully decoded + validated (that is what makes the
+        path trustworthy). Anything failing -- apply included -- falls
+        back to greedy clearing, so a QUBO miss never breaks routing,
+        it just costs the solve time.
         """
         # Function-level imports: qubo_solver → qubo_formulator →
         # congestion_handler (this module) at top level, so importing
@@ -395,7 +540,27 @@ class CongestionHandler:
 
         try:
             problem = QUBOFormulator().build(window, pg)
-            solution = QUBOSolver().solve(problem)
+            seed = self._greedy_seed_sample(problem, pg)
+            # Two-tier SA budget (measured): windows with at most 150
+            # PRIMARY variables keep the full 200-read budget -- every
+            # observed accept lives in this regime, and primaries (not
+            # aux-inflated totals) measure the problem's true size, so
+            # small-window behavior is byte-identical across budget
+            # experiments. Above that, reads scale as 20000/total
+            # floored at 10: monster windows get a bounded-effort
+            # attempt (they have never produced an accept, only minutes
+            # of anneal time) and fall back to greedy on a miss.
+            # Pavan's solver defaults are untouched -- this override
+            # lives only here.
+            total_vars = problem.num_variables + problem.num_aux_variables
+            if problem.num_variables <= 150:
+                reads = 200
+            else:
+                reads = max(10, 20000 // max(total_vars, 1))
+            self._solve_counter += 1
+            solution = QUBOSolver(
+                sa_num_reads=reads, sa_seed=1000 + self._solve_counter
+            ).solve(problem, initial_states=seed)
             decoded = SolutionDecoder().decode_and_validate(solution, placement, pg)
         except Exception as exc:
             logger.warning(
@@ -407,14 +572,52 @@ class CongestionHandler:
         if not decoded.accepted or not decoded.decoded_path:
             return None
 
-        try:
-            SolutionDecoder().apply_to_placement(decoded, placement, pg)
-        except ValueError as exc:
-            logger.warning(
-                "QUBO apply failed (%s); falling back to greedy.", exc
+        # Margin gate: the decoder accepts any strict improvement, but
+        # walk-execution turbulence (vacates, re-routing from the new
+        # board) routinely eats ~1 hop of on-paper savings. Demanding
+        # margin >= 2 filters accepts that would tie or lose in
+        # practice (measured across chain/long-range/random circuits).
+        margin = decoded.C_heuristic - decoded.C_QUBO
+        if margin < self.required_margin:
+            logger.info(
+                "QUBO margin too thin (%d < %d); falling back to greedy.",
+                margin, self.required_margin,
             )
             return None
+        self.stats["accept_margins"].append(margin)
 
+        # Execution-cost gate: simulate walking the decoded path vs what
+        # greedy clearing would walk, on the CURRENT board (read-only
+        # dry runs via ShawRoutingPass's own planner, so estimates
+        # match what the walk would really emit). Accept only if the
+        # QUBO walk is strictly cheaper to execute. Rationale
+        # (measured): on small boards the C_heur estimate goes so loose
+        # (margins 6-8 on 008-class circuits) that fat-margin accepts
+        # still lose double digits in walk-vacate execution -- hop-count
+        # margin alone cannot see that. (Imports are function-level:
+        # shaw_routing_pass imports this module.)
+        from shaw_routing_pass import ShawRoutingPass
+        mover = placement.occupant_of(decoded.decoded_path[0])
+        if mover is not None:
+            greedy_path, _ = self._greedy_outcome(path, blocked, placement, pg)
+            qubo_cost = ShawRoutingPass._estimate_walk_markers(
+                pg, placement, decoded.decoded_path, mover
+            )
+            greedy_cost = ShawRoutingPass._estimate_walk_markers(
+                pg, placement, greedy_path, mover
+            )
+            if qubo_cost >= greedy_cost:
+                logger.info(
+                    "QUBO walk cost %d >= greedy walk cost %d; "
+                    "falling back to greedy.", qubo_cost, greedy_cost,
+                )
+                return None
+
+        # NOTE (measured): a blockers-only pre-clear variant was tried
+        # here and reverted -- displacing blockers speculatively
+        # perturbs later gates more than the walk-vacates it saves
+        # (020's only win vanished, losses steepened). Mover-only
+        # execution it is: the walk handles blockers live.
         return decoded.decoded_path
 
     # -----------------------------------------------------------------------

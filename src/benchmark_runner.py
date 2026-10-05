@@ -298,7 +298,7 @@ class BenchmarkRunner:
                        [r.qubo_acceptance_rate for r in hybrid_runs])
             ax.set_xlabel("QUBO triggers (not solves)")
             ax.set_ylabel("QUBO acceptance rate")
-            ax.set_title("Trigger count vs acceptance (solver not yet integrated)")
+            ax.set_title("Trigger count vs acceptance")
             fig.tight_layout()
             fig.savefig(PLOTS_DIR / "qubo_acceptance.png", dpi=160)
             plt.close(fig)

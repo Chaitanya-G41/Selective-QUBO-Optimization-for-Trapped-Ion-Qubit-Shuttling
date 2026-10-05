@@ -114,9 +114,12 @@ class QUBOSolver:
         Number of update sweeps per SA read.  Default: 1000.
     sa_initial_temperature : float | None
         Starting temperature for SA schedule.  None lets neal auto-tune.
-    sa_final_temperature : float | None
-        Ending temperature for SA schedule.  None lets neal auto-tune.
-    """
+        sa_final_temperature : float | None
+            Ending temperature for SA schedule.  None lets neal auto-tune.
+        sa_seed : int | None
+            Random seed for SimulatedAnnealing (reproducible benchmarks).
+            None (default) = nondeterministic. Ignored by ExactSolver.
+        """
 
     def __init__(
         self,
@@ -125,18 +128,24 @@ class QUBOSolver:
         sa_num_sweeps: int = 1000,
         sa_initial_temperature: Optional[float] = None,
         sa_final_temperature: Optional[float] = None,
+        sa_seed: Optional[int] = None,
     ) -> None:
         self.exact_threshold = exact_threshold
         self.sa_num_reads = sa_num_reads
         self.sa_num_sweeps = sa_num_sweeps
         self.sa_initial_temperature = sa_initial_temperature
         self.sa_final_temperature = sa_final_temperature
+        self.sa_seed = sa_seed
 
     # -----------------------------------------------------------------------
     # Public entry point
     # -----------------------------------------------------------------------
 
-    def solve(self, problem: QUBOProblem) -> QUBOSolution:
+    def solve(
+        self,
+        problem: QUBOProblem,
+        initial_states: Optional[Dict[str, int]] = None,
+    ) -> QUBOSolution:
         """
         Auto-select solver based on problem size and return best solution.
 
@@ -147,6 +156,10 @@ class QUBOSolver:
         Parameters
         ----------
         problem : QUBOProblem   (from qubo_formulator.py)
+        initial_states : dict {variable_label: 0/1}, optional
+            Warm-start state for SimulatedAnnealing (e.g. a greedy path
+            seed built by the caller). Ignored by ExactSolver, which
+            enumerates everything. None (default) = cold start.
 
         Returns
         -------
@@ -164,7 +177,7 @@ class QUBOSolver:
                 "Auto-select: SimulatedAnnealing (total vars=%d > threshold=%d)",
                 total_vars, self.exact_threshold,
             )
-            return self.solve_sa(problem)
+            return self.solve_sa(problem, initial_states=initial_states)
 
     # -----------------------------------------------------------------------
     # ExactSolver  (optimal, exponential cost — small instances only)
@@ -243,7 +256,11 @@ class QUBOSolver:
     # Simulated Annealing  (heuristic, scalable — larger instances)
     # -----------------------------------------------------------------------
 
-    def solve_sa(self, problem: QUBOProblem) -> QUBOSolution:
+    def solve_sa(
+        self,
+        problem: QUBOProblem,
+        initial_states: Optional[Dict[str, int]] = None,
+    ) -> QUBOSolution:
         """
         Solve with neal.SimulatedAnnealingSampler.
 
@@ -254,6 +271,10 @@ class QUBOSolver:
         Parameters
         ----------
         problem : QUBOProblem
+        initial_states : dict {variable_label: 0/1}, optional
+            Warm-start state broadcast to all reads (e.g. a greedy-path
+            seed). Turns SA from global search into local polish around
+            a known-good region. None (default) = cold start.
 
         Returns
         -------
@@ -277,6 +298,10 @@ class QUBOSolver:
             sa_kwargs["initial_temperature"] = self.sa_initial_temperature
         if self.sa_final_temperature is not None:
             sa_kwargs["final_temperature"] = self.sa_final_temperature
+        if self.sa_seed is not None:
+            sa_kwargs["seed"] = self.sa_seed
+        if initial_states is not None:
+            sa_kwargs["initial_states"] = initial_states
 
         t0 = time.perf_counter()
         sampleset: dimod.SampleSet = sampler.sample(problem.bqm, **sa_kwargs)
@@ -317,6 +342,7 @@ class QUBOSolver:
                 "num_feasible": num_feasible,
                 "feasibility_rate": feasibility_rate,
                 "sampleset": sampleset,      # full sampleset for deeper analysis
+                "warm_started": initial_states is not None,
             },
         )
 

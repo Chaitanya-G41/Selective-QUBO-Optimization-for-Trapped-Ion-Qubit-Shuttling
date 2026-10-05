@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple, TYPE_CHECKING
 
 from congestion_handler import WindowInfo
 from qubo_solver import QUBOSolution
@@ -110,9 +110,24 @@ class SolutionDecoder:
                     trajectories=trajectories,
                 )
 
-        # Step 4 – extract moving ion path
+        # Step 4 – extract moving ion path. A path with fewer than 2
+        # nodes is degenerate (a zero-hop "solution" that claims 100%
+        # improvement while routing nothing -- observed live when the
+        # mover's whole trajectory collapses to one position) and is
+        # rejected outright rather than compared.
         decoded_path = self._extract_moving_ion_path(trajectories, window)
-        C_QUBO = len(decoded_path) - 1 if decoded_path else 0
+        if not decoded_path or len(decoded_path) < 2:
+            logger.info(
+                "QUBO solution rejected: degenerate %s-node path.",
+                0 if not decoded_path else len(decoded_path),
+            )
+            return DecodedSolution(
+                accepted=False, decoded_path=None,
+                C_QUBO=0, C_heuristic=C_heuristic,
+                improvement=0.0, violation="empty_path",
+                trajectories=trajectories,
+            )
+        C_QUBO = len(decoded_path) - 1
 
         # Step 5 – cost comparison (methodology §9)
         if C_QUBO >= C_heuristic:
@@ -462,10 +477,16 @@ class SolutionDecoder:
         decoded: DecodedSolution,
         placement: "Placement",
         pg: "PositionGraph",
+        skip_ions: FrozenSet[Any] = frozenset(),
     ) -> None:
         """
-        Apply every ion's accepted trajectory to the live Placement, in
-        timestep order.
+        Apply accepted trajectories to the live Placement, in timestep
+        order, skipping any ion in `skip_ions` (left exactly where it
+        is). The selective-QUBO hookup skips the moving ion: its
+        decoded path is walked by ShawRoutingPass instead, while
+        blockers are pre-cleared here -- replaying the mover too would
+        walk it twice (once to the target via apply, once backward
+        through the path via the walk).
 
         Within a single timestep, one ion's move can depend on another
         ion vacating its target position first (e.g. ion A moves into
@@ -491,7 +512,7 @@ class SolutionDecoder:
         for t in range(1, T):
             pending: List[Tuple[Any, Any, Any]] = []
             for ion, traj in decoded.trajectories.items():
-                if t >= len(traj):
+                if ion in skip_ions or t >= len(traj):
                     continue
                 prev_pos, new_pos = traj[t - 1], traj[t]
                 if prev_pos != new_pos:
