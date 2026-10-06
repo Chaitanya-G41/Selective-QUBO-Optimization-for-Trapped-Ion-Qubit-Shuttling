@@ -1,8 +1,16 @@
+# Core quantum compilation framework
 bqskit==1.2.1
+
+# Hardware graph & topology
 networkx==3.4.2
+
+# Numerics & plotting
 numpy>=1.24
 matplotlib>=3.7
-pytest>=7.4
-pytest-cov
+
+# QUBO solvers
 dimod>=0.12
 dwave-neal>=0.6
+
+# Streamlit frontend
+streamlit>=1.35
