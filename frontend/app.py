@@ -26,7 +26,46 @@ from qubo_formulator  import QUBOFormulator, QUBOProblem
 from qubo_solver      import QUBOSolver, QUBOSolution
 from solution_decoder import SolutionDecoder, DecodedSolution
 from benchmark_runner import BenchmarkRunner
-from test_qasm_suite  import load_qasm, build_circuit
+
+# ---------------------------------------------------------------------------
+# QASM parsing helpers (inlined from tests/ to avoid importing a test module)
+# ---------------------------------------------------------------------------
+import re as _re
+from bqskit.ir.circuit import Circuit as _Circuit
+from bqskit.ir.gates import HGate as _HGate, CNOTGate as _CNOTGate
+
+_H_PAT    = _re.compile(r"^h q\[(\d+)\];$")
+_CX_PAT   = _re.compile(r"^cx q\[(\d+)\], q\[(\d+)\];$")
+_QREG_PAT = _re.compile(r"^qubit\[(\d+)\] q;$")
+
+
+def load_qasm(name: str):
+    """Parse one QASM corpus file → (num_qudits, ops). Supports h / cx only."""
+    path = Path(TESTS_DIR) / name
+    lines = [ln.strip() for ln in path.read_text().splitlines() if ln.strip()]
+    m = _QREG_PAT.match(lines[2])
+    if not m:
+        raise ValueError(f"{name}: unexpected qubit register line: {lines[2]!r}")
+    num_qudits = int(m.group(1))
+    ops = []
+    for ln in lines[3:]:
+        mh, mc = _H_PAT.match(ln), _CX_PAT.match(ln)
+        if mh:
+            ops.append(("h", int(mh.group(1))))
+        elif mc:
+            ops.append(("cx", int(mc.group(1)), int(mc.group(2))))
+    return num_qudits, ops
+
+
+def build_circuit(num_qudits: int, ops) -> _Circuit:
+    circuit = _Circuit(num_qudits)
+    for op in ops:
+        if op[0] == "h":
+            circuit.append_gate(_HGate(), (op[1],))
+        else:
+            circuit.append_gate(_CNOTGate(), (op[1], op[2]))
+    return circuit
+
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -495,13 +534,16 @@ with tab2:
     # -----------------------------------------------------------------------
     if demo_mode == "QASM Benchmark Execution":
         curated = [
-            ("010_chain_6q.qasm  —  6Q / 7G  /  50% QUBO acceptance",      "010_chain_6q.qasm"),
-            ("008_chain_9q.qasm  —  9Q / 11G /  75% cost reduction",        "008_chain_9q.qasm"),
-            ("009_chain_16q.qasm — 16Q / 20G /  multi-QUBO acceleration",   "009_chain_16q.qasm"),
-            ("011_chain_13q.qasm — 13Q / 16G /  chain routing",             "011_chain_13q.qasm"),
-            ("017_chain_4q.qasm  —  4Q / 5G  /  fast linear move",          "017_chain_4q.qasm"),
-            ("051_star_4q.qasm   —  4Q / 5G  /  star topology",             "051_star_4q.qasm"),
-            ("congestion.qasm    —  high-contention microbenchmark",         "congestion.qasm"),
+            ("168_random_7q.qasm  —  7Q / Random      /  6/10 accepted (60.0%) / +69.2% improvement",  "168_random_7q.qasm"),
+            ("043_chain_16q.qasm  — 16Q / Chain       /  5/9  accepted (55.6%) / +75.0% improvement",  "043_chain_16q.qasm"),
+            ("031_chain_17q.qasm  — 17Q / Chain       /  5/9  accepted (55.6%) / +75.0% improvement",  "031_chain_17q.qasm"),
+            ("019_chain_18q.qasm  — 18Q / Chain       /  5/9  accepted (55.6%) / +75.0% improvement",  "019_chain_18q.qasm"),
+            ("192_random_5q.qasm  —  5Q / Random      /  5/12 accepted (41.7%) / +68.3% improvement",  "192_random_5q.qasm"),
+            ("184_random_17q.qasm — 17Q / Random      /  5/13 accepted (38.5%) / +64.7% improvement",  "184_random_17q.qasm"),
+            ("133_layered_17q.qasm — 17Q / Layered    /  4/12 accepted (33.3%) / +70.8% improvement",  "133_layered_17q.qasm"),
+            ("197_random_6q.qasm  —  6Q / Random      /  4/10 accepted (40.0%) / +64.6% improvement",  "197_random_6q.qasm"),
+            ("132_layered_10q.qasm — 10Q / Layered    /  3/7  accepted (42.9%) / +58.3% improvement",  "132_layered_10q.qasm"),
+            ("090_long_range_5q.qasm — 5Q / Long-Range /  1/1 accepted (100%)  / +75.0% improvement",  "090_long_range_5q.qasm"),
         ]
         labels = [c[0] for c in curated]
         files  = [c[1] for c in curated]
