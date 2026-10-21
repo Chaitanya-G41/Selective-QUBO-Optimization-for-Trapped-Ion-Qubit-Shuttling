@@ -11,6 +11,7 @@ matplotlib>=3.7
 # QUBO solvers
 dimod>=0.12
 dwave-neal>=0.6
+dwave-samplers>=1.0   # TabuSampler (default QUBO solver)
 
 # Streamlit frontend
 streamlit>=1.35
