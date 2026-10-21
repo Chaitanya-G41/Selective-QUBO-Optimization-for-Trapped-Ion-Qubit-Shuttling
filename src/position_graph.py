@@ -154,6 +154,12 @@ class Placement:
         self._phi[qudit] = new_position
         self._occupant[new_position] = qudit
 
+    def swap(self, qudit_a: int, qudit_b: int) -> None:
+        """Exchange the positions of two placed qudits."""
+        pos_a, pos_b = self._phi[qudit_a], self._phi[qudit_b]
+        self._phi[qudit_a], self._phi[qudit_b] = pos_b, pos_a
+        self._occupant[pos_a], self._occupant[pos_b] = qudit_b, qudit_a
+
     def position_of(self, qudit: int) -> str:
         return self._phi[qudit]
 
@@ -187,4 +193,36 @@ def build_linear_qccd(num_traps: int, trap_capacity: int) -> PositionGraph:
         pg.connect_trap_to_segment(pg.slots_of(trap_ids[i])[-1], seg_id)
         pg.connect_trap_to_segment(pg.slots_of(trap_ids[i + 1])[0], seg_id)
 
+    return pg
+
+def build_junction_grid_qccd(rows: int, cols: int, trap_capacity: int) -> PositionGraph:
+    """A 2-D QCCD: X-junctions on a rows x cols grid, with one linear trap
+    on every edge between neighbouring junctions. A trap's first slot
+    connects to one junction and its last slot to the other, so an ion
+    crossing a trap passes through its whole ion chain.
+
+        J(0,0) --[h0_0]-- J(0,1) --[h0_1]-- J(0,2)
+          |                 |                 |
+        [v0_0]            [v0_1]            [v0_2]
+          |                 |                 |
+        J(1,0) --[h1_0]-- J(1,1) --[h1_1]-- J(1,2)
+
+    Traps are named "h{r}_{c}" (horizontal) and "v{r}_{c}" (vertical).
+    """
+    pg = PositionGraph()
+    for r in range(rows):
+        for c in range(cols):
+            pg.add_segment(f"J{r}_{c}")
+
+    def add_trap_between(trap_id: str, end_a: str, end_b: str) -> None:
+        slots = pg.add_trap(trap_id, trap_capacity)
+        pg.connect_trap_to_segment(slots[0], end_a)
+        pg.connect_trap_to_segment(slots[-1], end_b)
+
+    for r in range(rows):
+        for c in range(cols - 1):
+            add_trap_between(f"h{r}_{c}", f"J{r}_{c}", f"J{r}_{c + 1}")
+    for r in range(rows - 1):
+        for c in range(cols):
+            add_trap_between(f"v{r}_{c}", f"J{r}_{c}", f"J{r + 1}_{c}")
     return pg
