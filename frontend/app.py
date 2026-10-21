@@ -4,7 +4,6 @@ QubRoute — Selective-QUBO Trapped-Ion Quantum Shuttling Compiler
 
 import sys
 import os
-import time
 from pathlib import Path
 from typing import Dict, List, Any
 
@@ -21,11 +20,12 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
 from position_graph   import build_linear_qccd, Placement, PositionGraph
-from congestion_handler import CongestionHandler, WindowInfo
-from qubo_formulator  import QUBOFormulator, QUBOProblem
-from qubo_solver      import QUBOSolver, QUBOSolution
-from solution_decoder import SolutionDecoder, DecodedSolution
+from congestion_handler import CongestionHandler, seed_from, walk_trajectories
+from qubo_formulator  import QUBOFormulator
+from qubo_solver      import QUBOSolver
+from solution_decoder import SolutionDecoder
 from benchmark_runner import BenchmarkRunner
+from walk_planner     import plan_walk, walk_cost
 
 # ---------------------------------------------------------------------------
 # QASM parsing helpers (inlined from tests/ to avoid importing a test module)
@@ -429,14 +429,23 @@ with st.sidebar:
         trap_capacity = st.selectbox("Ions per Trap", options=[1, 2], index=1)
 
     with st.expander("Congestion Thresholds", expanded=True):
-        kappa_th = st.slider("Local Contention (κ_th)", 0.05, 0.80, 0.20, 0.05)
-        rho_th   = st.slider("Routing Regret (ρ_th)",  0.05, 0.80, 0.20, 0.05)
-        depth_th = st.number_input("Blockage Depth (d_max)", min_value=0, max_value=5, value=0, step=1)
+        kappa_th = st.slider("Local Contention (κ_th)", 0.0, 0.80, 0.0, 0.05)
+        rho_th   = st.slider("Routing Regret (ρ_th)",  0.0, 0.80, 0.0, 0.05)
+        depth_th = st.number_input("Blockage Depth (d_max)", min_value=0, max_value=5, value=2, step=1)
 
     with st.expander("QUBO Solver", expanded=False):
-        solver_mode = st.radio("Engine", ["Simulated Annealing (SA)", "Exact Solver (dimod)"], index=0)
-        sa_reads    = st.number_input("SA Reads",   min_value=20,  max_value=1000, value=200,  step=50)
-        sa_sweeps   = st.number_input("SA Sweeps",  min_value=100, max_value=2000, value=1000, step=100)
+        solver_mode = st.radio("Engine", ["Tabu Search", "Simulated Annealing"], index=0)
+        num_reads   = st.number_input("Reads", min_value=1, max_value=200, value=2, step=1)
+        tabu_effort = st.number_input("Tabu iterations per variable", min_value=100, max_value=20000, value=4000, step=500)
+
+
+def make_solver(seed=None) -> QUBOSolver:
+    return QUBOSolver(
+        method="tabu" if solver_mode == "Tabu Search" else "sa",
+        num_reads=int(num_reads),
+        tabu_effort=int(tabu_effort),
+        seed=seed,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -554,6 +563,10 @@ with tab2:
             with col_sel:
                 selected_label = st.selectbox("Circuit", labels, index=0, label_visibility="collapsed")
                 selected_file  = files[labels.index(selected_label)]
+                architecture   = st.selectbox(
+                    "Architecture", ["linear", "junction_grid", "grid", "grid_dense"], index=0,
+                    help="linear: traps in a chain; junction_grid: linear traps between X-junctions",
+                )
             with col_btn:
                 st.write("")
                 run_live = st.button("Compile", use_container_width=True)
@@ -569,37 +582,40 @@ with tab2:
                     st.info(f"Source file {selected_file} not found in tests directory.")
 
         if run_live:
-            with st.spinner(f"Compiling {selected_file} ..."):
+            with st.spinner(f"Compiling {selected_file} (baseline and selective QUBO) ..."):
                 num_qudits, ops = load_qasm(selected_file)
                 circuit = build_circuit(num_qudits, ops)
                 runner  = BenchmarkRunner(
                     qubo_enabled=True,
                     kappa_threshold=kappa_th,
                     rho_threshold=rho_th,
+                    architecture=architecture,
                 )
-                t0      = time.perf_counter()
-                metrics = runner._route(selected_file, circuit, hybrid=True)
-                elapsed = time.perf_counter() - t0
+                baseline = runner._route(selected_file, circuit, hybrid=False)
+                metrics  = runner._route(selected_file, circuit, hybrid=True)
 
-            pct = (metrics.qubo_accepted / metrics.qubo_triggers * 100) if metrics.qubo_triggers else 0.0
+            base_ops = baseline.total_shuttle_ops + baseline.swap_count
+            qubo_ops = metrics.total_shuttle_ops + metrics.swap_count
+            gain = (base_ops - qubo_ops) / base_ops * 100 if base_ops else 0.0
             c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("Qubits",            str(metrics.num_qudits))
-            c2.metric("Gates",             str(metrics.num_gates_original))
-            c3.metric("Congestion Events", str(metrics.congestion_events))
-            c4.metric("QUBO Triggers",     str(metrics.qubo_triggers))
-            c5.metric("QUBO Accepted",     f"{metrics.qubo_accepted}  ({pct:.0f}%)")
+            c1.metric("Qubits",             str(metrics.num_qudits))
+            c2.metric("Baseline Ops",       str(base_ops))
+            c3.metric("Selective-QUBO Ops", str(qubo_ops), delta=f"{gain:+.1f}%")
+            c4.metric("QUBO Triggers",      str(metrics.qubo_triggers))
+            c5.metric("QUBO Accepted",      str(metrics.qubo_accepted))
 
             st.write("")
-
             if metrics.qubo_accepted > 0:
                 st.markdown(
-                    f'<div class="badge-ok">Selective-QUBO accepted <b>{metrics.qubo_accepted} of {metrics.qubo_triggers} triggered problems ({pct:.1f}%)</b> '
-                    f'— achieving up to 75% shuttling cost improvements over heuristic routing.</div>',
+                    f'<div class="badge-ok">{metrics.qubo_accepted} QUBO plans accepted '
+                    f'(each strictly cheaper than the greedy walk at that point). '
+                    f'Total physical operations: {base_ops} → {qubo_ops} ({gain:+.1f}%).</div>',
                     unsafe_allow_html=True,
                 )
             else:
                 st.markdown(
-                    '<div class="badge-neutral">All events cleared via greedy heuristic — zero deadlocks.</div>',
+                    '<div class="badge-neutral">No QUBO plan beat the greedy walk on this circuit; '
+                    'routing is identical to the baseline.</div>',
                     unsafe_allow_html=True,
                 )
 
@@ -616,7 +632,7 @@ with tab2:
                         {"Parameter": "Mean Contention (κ)",         "Value": f"{metrics.kappa_mean:.3f}"},
                         {"Parameter": "Mean Routing Regret (ρ)",     "Value": f"{metrics.rho_mean:.3f}"},
                         {"Parameter": "Mean Blockage Depth (d)",     "Value": f"{metrics.depth_mean:.2f}"},
-                        {"Parameter": "Compilation Time",            "Value": f"{metrics.compile_time_s:.3f} s"},
+                        {"Parameter": "Compile Time (QUBO / baseline)", "Value": f"{metrics.compile_time_s:.3f} s / {baseline.compile_time_s:.3f} s"},
                     ]
                     st.dataframe(res_table, use_container_width=True)
 
@@ -636,7 +652,7 @@ with tab2:
                         st.caption(f"Showing first 10 of {len(ops)} operations.")
 
     # -----------------------------------------------------------------------
-    # MODE B — Single Window Deep Dive
+    # MODE B — Single Window Deep Dive (real pipeline, step by step)
     # -----------------------------------------------------------------------
     else:
         with st.container(border=True):
@@ -644,168 +660,126 @@ with tab2:
             scenario = st.selectbox(
                 "Shuttling Scenario",
                 [
-                    "Optimized Congestion Window (QUBO Solution Accepted)",
-                    "Severe Multi-Blocker Contention (QUBO Rejection -> Heuristic Fallback)",
-                    "Adjacent Move (Uncongested Path -> Pure Heuristic)",
+                    "Blocked trap crossing (QUBO beats greedy)",
+                    "Long blocked chain (QUBO beats greedy)",
+                    "Greedy already optimal (QUBO skipped)",
+                    "Uncongested path (no QUBO needed)",
                 ],
                 index=0,
             )
 
-        pg_d = build_linear_qccd(num_traps=3, trap_capacity=2)
-        pl_d = Placement(pg_d)
-
-        if "Accepted" in scenario:
-            src = pg_d.slots_of("t0")[0]
-            tgt = pg_d.slots_of("t1")[0]
-            pl_d.place(0, src)
-            pl_d.place(1, pg_d.slots_of("t0")[1])
-            path = ["t0:0", "t0:1", "seg0", "t1:0"]
-            blocked = ["t0:1"]
-            is_accepted_case = True
-        elif "Fallback" in scenario:
-            src = pg_d.slots_of("t0")[0]
-            tgt = pg_d.slots_of("t2")[0]
-            pl_d.place(0, src)
-            pl_d.place(1, pg_d.slots_of("t1")[0])
-            pl_d.place(2, pg_d.slots_of("t1")[1])
-            path = pg_d.shortest_path(src, tgt)
-            blocked = ["t1:0", "t1:1"]
-            is_accepted_case = False
+        if scenario.startswith("Long"):
+            pg_d = build_linear_qccd(num_traps=4, trap_capacity=2)
+            pl_d = Placement(pg_d)
+            for q in range(4):
+                pl_d.place(q, f"t{q}:0")
+            path = pg_d.shortest_path("t0:0", "t3:1")
+        elif scenario.startswith("Blocked"):
+            pg_d = build_linear_qccd(num_traps=3, trap_capacity=2)
+            pl_d = Placement(pg_d)
+            for q in range(3):
+                pl_d.place(q, f"t{q}:0")
+            path = pg_d.shortest_path("t0:0", "t2:1")
+        elif scenario.startswith("Greedy"):
+            pg_d = build_linear_qccd(num_traps=3, trap_capacity=2)
+            pl_d = Placement(pg_d)
+            pl_d.place(0, "t0:0")
+            pl_d.place(1, "t0:1")
+            path = pg_d.shortest_path("t0:0", "t1:0")
         else:
-            src = pg_d.slots_of("t0")[0]
-            tgt = pg_d.slots_of("t0")[1]
-            pl_d.place(0, src)
-            path = pg_d.shortest_path(src, tgt)
-            blocked = []
-            is_accepted_case = False
+            pg_d = build_linear_qccd(num_traps=3, trap_capacity=2)
+            pl_d = Placement(pg_d)
+            pl_d.place(0, "t0:0")
+            path = pg_d.shortest_path("t0:0", "t2:0")
 
         handler = CongestionHandler(
-            kappa_threshold=kappa_th, rho_threshold=rho_th,
-            depth_threshold=depth_th, window_max_size=6,
+            kappa_threshold=kappa_th, rho_threshold=rho_th, depth_threshold=depth_th,
         )
-
-        kappa        = handler._compute_kappa(path, pl_d) if path else 0.0
-        rho          = handler._compute_rho(blocked, max(1, len(path) - 1)) if path else 0.0
-        depth        = handler._compute_blockage_depth(blocked, pl_d, pg_d)
-        should_qubo  = handler.should_trigger_qubo(kappa, rho, depth) or is_accepted_case
+        blocked   = handler._detect_blockages(path, pl_d)
+        kappa     = handler._compute_kappa(path, pl_d)
+        rho       = handler._compute_rho(blocked, len(path) - 1)
+        depth     = handler._compute_blockage_depth(blocked, pl_d, pg_d)
+        triggered = bool(blocked) and handler.should_trigger_qubo(kappa, rho, depth)
+        mover       = pl_d.occupant_of(path[0])
+        greedy_cost = walk_cost(pg_d, pl_d, path, mover)
 
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Contention (κ)",    f"{kappa:.3f}", delta=f"Threshold {kappa_th:.2f}")
-        m2.metric("Routing Regret (ρ)", f"{rho:.3f}",  delta=f"Threshold {rho_th:.2f}")
-        m3.metric("Blockage Depth (d)", str(depth),    delta=f"Threshold {depth_th}")
-        m4.metric("Trigger Decision",  "QUBO" if should_qubo else "Heuristic")
+        m1.metric("Contention (κ)",     f"{kappa:.3f}", delta=f"Threshold {kappa_th:.2f}")
+        m2.metric("Routing Regret (ρ)", f"{rho:.3f}",   delta=f"Threshold {rho_th:.2f}")
+        m3.metric("Blockage Depth (d)", str(depth),     delta=f"Threshold {depth_th}")
+        m4.metric("Greedy Walk Cost",   f"{greedy_cost} ops")
 
-        if should_qubo:
-            st.markdown('<div class="badge-warn">Severe congestion — escalating to QUBO optimizer.</div>',
+        window = handler.extract_window(path, blocked, pl_d, pg_d) if triggered else None
+        lower_bound = (
+            min(len(pg_d.shortest_path(path[0], g)) - 1 for g in window.goal_nodes)
+            if window else None
+        )
+
+        if not blocked:
+            st.markdown('<div class="badge-ok">Path clear — the mover just walks it.</div>',
                         unsafe_allow_html=True)
+        elif not triggered:
+            st.markdown('<div class="badge-neutral">Below trigger thresholds — greedy walk.</div>',
+                        unsafe_allow_html=True)
+        elif window is None:
+            st.markdown('<div class="badge-neutral">Window too large — greedy walk.</div>',
+                        unsafe_allow_html=True)
+        elif greedy_cost <= lower_bound:
+            st.markdown(
+                f'<div class="badge-neutral">Greedy walk ({greedy_cost} ops) already meets the '
+                f'lower bound ({lower_bound} ops) — QUBO skipped.</div>',
+                unsafe_allow_html=True,
+            )
         else:
-            st.markdown('<div class="badge-ok">Path clear — routing via fast heuristic.</div>',
-                        unsafe_allow_html=True)
+            traj     = walk_trajectories(pg_d, pl_d, path, window)
+            problem  = QUBOFormulator().build(window, pg_d, min_horizon=len(traj[mover]) - 1)
+            solution = make_solver(seed=1).solve(problem, initial_state=seed_from(problem, traj))
+            plan, violations = SolutionDecoder().best_plan(solution)
+            accepted = plan is not None and plan.cost < greedy_cost
 
-        st.write("")
-        col_w1, col_w2 = st.columns(2)
+            col_w1, col_w2 = st.columns(2)
+            with col_w1:
+                with st.container(border=True):
+                    st.markdown("#### QUBO Model")
+                    st.dataframe([
+                        {"Parameter": "Ions in window",          "Value": str(len(window.active_ions))},
+                        {"Parameter": "Time horizon T",          "Value": f"{problem.time_horizon} steps"},
+                        {"Parameter": "Decision variables",      "Value": str(problem.num_variables)},
+                        {"Parameter": "Rosenberg aux variables", "Value": str(problem.num_aux_variables)},
+                        {"Parameter": "Quadratic couplings",     "Value": str(len(problem.bqm.quadratic))},
+                        {"Parameter": "Penalty P",               "Value": f"{problem.penalty:.1f}"},
+                        {"Parameter": "Solver",                  "Value": solution.solver_used},
+                        {"Parameter": "Solve time",              "Value": f"{solution.solve_time_s * 1000:.1f} ms"},
+                        {"Parameter": "Candidates rejected",     "Value": f"{len(violations)} {sorted(set(violations))}"},
+                    ], use_container_width=True)
+            with col_w2:
+                with st.container(border=True):
+                    fig_win = render_topology(pg_d, pl_d, highlight_path=path,
+                                              highlight_window=list(window.window_nodes),
+                                              title="Congestion Window (W)")
+                    st.pyplot(fig_win, use_container_width=True)
+                    plt.close(fig_win)
 
-        with col_w1:
             with st.container(border=True):
-                if is_accepted_case:
-                    window = WindowInfo(
-                        window_nodes=frozenset({"t0:0", "t0:1", "seg0", "t1:0"}),
-                        active_ions={0: "t0:0"},
-                        obstacle_ions={},
-                        source="t0:0",
-                        target="t1:0",
-                        blocked_path=["t0:1", "seg0"],
-                        center_nodes=["seg0"],
-                        radius=1,
-                        size_capped=False,
-                    )
-                    inv_var_map = {
-                        "x_0_t00_0": (0, "t0:0", 0),
-                        "x_0_t01_1": (0, "t0:1", 1),
-                        "x_0_seg0_2": (0, "seg0", 2),
-                        "x_0_t10_3": (0, "t1:0", 3),
-                    }
-                    sample = {k: 1 for k in inv_var_map}
-                    problem = QUBOProblem(
-                        bqm=None, var_map={}, inv_var_map=inv_var_map,
-                        num_variables=4, num_aux_variables=0, time_horizon=3,
-                        penalty_lambda=10.0, window=window,
-                    )
+                st.markdown("#### Greedy walk vs QUBO plan")
+                g_col, q_col = st.columns(2)
+                g_col.markdown(f"**Greedy walk — {greedy_cost} ops**")
+                g_col.dataframe([{"Step": i + 1, "Action": str(a)} for i, a in
+                                 enumerate(plan_walk(pg_d, pl_d, path, mover))],
+                                use_container_width=True)
+                if plan is not None:
+                    q_col.markdown(f"**QUBO plan — {plan.cost} ops**")
+                    q_col.dataframe([{"Step": i + 1, "Action": str(op)} for i, op in
+                                     enumerate(plan.ops)], use_container_width=True)
                 else:
-                    window    = handler.extract_window(path, blocked, pl_d, pg_d, radius=1)
-                    formulator = QUBOFormulator(time_horizon=3)
-                    problem   = formulator.build(window, pg_d)
+                    q_col.markdown("**QUBO plan — no valid sample**")
 
-                st.markdown("#### QUBO Variable Budget")
-                bqm_len = len(problem.bqm.variables) if problem.bqm else problem.num_variables
-                quad_len = len(problem.bqm.quadratic) if problem.bqm else 6
-                q_stats = [
-                    {"Parameter": "Time Horizon (T)",               "Value": f"{problem.time_horizon} steps"},
-                    {"Parameter": "Decision Variables x_i,v,t",     "Value": str(problem.num_variables)},
-                    {"Parameter": "Rosenberg Aux Variables",        "Value": str(problem.num_aux_variables)},
-                    {"Parameter": "Total BQM Variables",            "Value": f"{bqm_len} / 100 limit"},
-                    {"Parameter": "Quadratic Couplings",            "Value": str(quad_len)},
-                    {"Parameter": "Penalty Multiplier (λ)",         "Value": f"{problem.penalty_lambda:.2f}"},
-                ]
-                st.dataframe(q_stats, use_container_width=True)
-
-        with col_w2:
-            with st.container(border=True):
-                fig_win = render_topology(pg_d, pl_d, highlight_path=path,
-                                          highlight_window=list(window.window_nodes),
-                                          title="Congestion Sub-Window (W)")
-                st.pyplot(fig_win, use_container_width=True)
-                plt.close(fig_win)
-
-        # Solver
-        if is_accepted_case:
-            solution = QUBOSolution(
-                sample=sample, energy=-14.2, is_feasible=True,
-                solver_used="simulated_annealing", solve_time_s=0.018, num_reads=200, problem=problem,
-            )
-            t_ms = 18.5
-        else:
-            if "Exact" in solver_mode:
-                solver = QUBOSolver(exact_threshold=100)
+            if accepted:
+                st.markdown(
+                    f'<div class="badge-ok">QUBO plan ACCEPTED: {plan.cost} ops vs greedy '
+                    f'{greedy_cost} ops ({(greedy_cost - plan.cost) / greedy_cost * 100:.1f}% fewer).</div>',
+                    unsafe_allow_html=True,
+                )
             else:
-                solver = QUBOSolver(exact_threshold=10,
-                                    sa_num_reads=int(sa_reads),
-                                    sa_num_sweeps=int(sa_sweeps))
-
-            t_s0    = time.perf_counter()
-            solution = solver.solve(problem)
-            t_ms    = (time.perf_counter() - t_s0) * 1000
-
-        decoder = SolutionDecoder()
-        decoded = decoder.decode_and_validate(solution, pl_d, pg_d)
-
-        st.write("")
-        s1, s2, s3, s4 = st.columns(4)
-        s1.metric("Solver",            solution.solver_used)
-        s2.metric("Ground Energy",     f"{solution.energy:.4f}")
-        s3.metric("Solve Latency",     f"{t_ms:.1f} ms")
-        s4.metric("Validation",        "ACCEPTED" if decoded.accepted else "REJECTED")
-
-        st.write("")
-        with st.container(border=True):
-            st.markdown("#### Physical Feasibility — 5-Check Suite")
-            checks = [
-                {"Check": "1. Movement Legality",   "Requirement": "Moves along physical edges E(G_p)",         "Result": "PASS"},
-                {"Check": "2. Trap Capacity",        "Requirement": "Occupancy within cap(v)",                   "Result": "PASS"},
-                {"Check": "3. One-Hot Occupancy",    "Requirement": "Exactly one position per ion per timestep", "Result": "PASS"},
-                {"Check": "4. Collision Avoidance",  "Requirement": "No simultaneous anti-crossing moves",       "Result": "PASS"},
-                {"Check": "5. Gate Feasibility",     "Requirement": "Ion reaches target within horizon T",       "Result": "PASS" if decoded.accepted else "FAIL"},
-            ]
-            st.dataframe(checks, use_container_width=True)
-
-        if decoded.accepted:
-            st.markdown(
-                f'<div class="badge-ok">QUBO solution ACCEPTED: C_QUBO = {decoded.C_QUBO} hops vs Heuristic Cost = {decoded.C_heuristic} '
-                f'hops ({decoded.improvement * 100:.1f}% improvement).</div>',
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                f'<div class="badge-neutral">Greedy heuristic fallback ({decoded.violation or "gate_feasibility"}) — zero deadlocks.</div>',
-                unsafe_allow_html=True,
-            )
+                st.markdown('<div class="badge-neutral">QUBO plan not cheaper — greedy walk used.</div>',
+                            unsafe_allow_html=True)
