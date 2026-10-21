@@ -57,3 +57,16 @@ if __name__ == "__main__":
         t()
         print(f"PASS: {t.__name__}")
     print("\nAll tests passed.")
+
+def test_junction_grid_wiring():
+    from position_graph import build_junction_grid_qccd
+
+    pg = build_junction_grid_qccd(rows=2, cols=3, trap_capacity=2)
+    traps = list(pg._trap_slots)
+    assert len(traps) == 2 * 2 + 1 * 3  # horizontal + vertical edges
+    # Each trap is a linear chain: first slot on one junction, last on the other.
+    first, last = pg.slots_of("h0_0")
+    assert pg.graph.has_edge(first, "J0_0") and pg.graph.has_edge(last, "J0_1")
+    assert not pg.graph.has_edge(first, "J0_1")
+    # Junctions only connect to trap ends, never directly to each other.
+    assert not any(str(n).startswith("J") for n in pg.graph.neighbors("J1_1"))
