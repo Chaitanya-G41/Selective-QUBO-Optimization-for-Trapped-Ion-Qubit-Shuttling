@@ -9,8 +9,3 @@ __pycache__/
 .idea/
 *.egg-info/
 
-# Experiment-tracker noise: rewritten automatically on every pytest run,
-# machine-specific, never meant for review. Deliberate benchmark outputs
-# (comparison.csv, the 5 benchmark plots) stay tracked.
-experiments/plots/system_iteration_trend.png
-experiments/results/experiment_history.json

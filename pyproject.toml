@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "selective-qubo-shuttling"
@@ -9,16 +9,30 @@ description = "Selective QUBO Optimization for Trapped-Ion Qubit Shuttling"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "bqskit>=1.2.1",
+    "bqskit==1.2.1",
     "networkx>=3.0",
     "numpy>=1.24",
     "matplotlib>=3.7",
+    "dimod>=0.12",
+    "dwave-neal>=0.6",
+    "dwave-samplers>=1.0",
 ]
 
 [project.optional-dependencies]
+frontend = ["streamlit>=1.35"]
+
 dev = [
     "pytest>=7.4",
     "pytest-cov",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src", "qccd" = "qccd"}
+packages = ["qccd"]
+py-modules = [
+    "benchmark_runner", "circuit_dag", "congestion_handler", "position_graph",
+    "qccd_adapter", "qubo_formulator", "qubo_solver", "shaw_routing_pass",
+    "solution_decoder", "walk_planner",
 ]
 
 [tool.pytest.ini_options]

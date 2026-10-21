@@ -25,10 +25,8 @@ The web dashboard will automatically open in your browser at `http://localhost:8
 - Live visualization of the architectural Position Graph $G_p = (V, E)$ (slots, segments, placed ions).
 - Trap and slot occupancy breakdown tables.
 
-### Tab 2: Live Routing Pipeline & Congestion Analysis
-- Pre-configured routing scenarios (high contention, uncongested path, cascaded blockers).
-- Dynamic calculation of contention severity metrics ($\kappa, \rho, d$).
-- Automated decision trigger: Fast Heuristic vs Selective QUBO Escalation.
-- Sub-problem window extraction ($W$) and QUBO problem size budgeting ($\le 100$ variables).
-- Real-time solver execution with `SimulatedAnnealingSampler` (neal) or `ExactSolver` (dimod).
-- 5-point physical feasibility validation checklist and decoded shuttling trajectories.
+### Tab 2: Live Routing & Benchmarks
+- **QASM Benchmark Execution**: pick a circuit and a machine (linear, junction grid, grid) and compile it with the baseline and with selective QUBO, side by side (operations, triggers, accepted plans, compile time).
+- **Single Window Deep Dive**: one congestion event step by step: severity metrics ($\kappa, 
+ho, d$), trigger and filter decisions, the window $W$, QUBO size, solver and rejected candidates, and the greedy walk vs the QUBO plan.
+- Sidebar: trigger thresholds and solver settings (tabu search or simulated annealing).

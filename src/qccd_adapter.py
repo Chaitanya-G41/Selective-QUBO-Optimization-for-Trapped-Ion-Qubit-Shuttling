@@ -22,9 +22,7 @@ through the *slot-based* interface ShawRoutingPass already calls:
     pg.graph.nodes[pos]["trap_id"]   (via ShawRoutingPass._trap_of)
     pg.slots_of(trap_id)
     pg.shortest_path(a, b)
-    Placement.place / .move / .position_of / .occupant_of / .is_occupied
-    Placement._occupant   (reached into directly by _swap_ions -- see
-                            shaw_routing_pass.py's own note on that)
+    Placement.place / .move / .swap / .position_of / .occupant_of / .is_occupied
 
 How: every real qccd node with capacity C becomes C "virtual slots"
 here, named (real_node_id, slot_index). A qccd TRAP node's virtual
@@ -168,11 +166,8 @@ class QccdPositionGraphAdapter:
 class QccdPlacementAdapter:
     """
     Placement backed by a QccdPositionGraphAdapter. Keeps its own
-    slot-level bookkeeping (phi / occupant, matching
-    src/position_graph.py's field names exactly -- shaw_routing_pass.py
-    reaches into `_occupant` directly for its swap workaround, so the
-    name has to match) and mirrors real moves into the underlying qccd
-    graph via place_ion / remove_ion / move_ion.
+    slot-level bookkeeping (phi / occupant) and mirrors real moves into
+    the underlying qccd graph via place_ion / remove_ion / move_ion.
     """
 
     def __init__(self, adapter: QccdPositionGraphAdapter) -> None:
@@ -185,60 +180,24 @@ class QccdPlacementAdapter:
         return self._adapter._real_of_slot[slot]
 
     def place(self, qudit: Any, position: Slot) -> None:
-        """
-        Initial placement, OR the second half of a swap workaround
-        (shaw_routing_pass.py's _swap_ions calls this twice after
-        popping both slots from `_occupant`). Handles both: if the
-        qudit was already somewhere, only touches the real qccd graph
-        when the real node actually changes.
-        """
+        """Initial placement of a qudit into a free slot."""
         if position in self._occupant:
             raise ValueError(f"position {position!r} is already occupied")
-
-        new_real = self._real_of(position)
-        prev_position = self._phi.get(qudit)
-
-        # _swap_ions calls place() for the *mover* before place() for
-        # the *occupant* it's trading with. If the destination real
-        # node is a capacity-2 trap that's already fully real (e.g.
-        # both its slots hold other qudits from earlier routing), the
-        # straightforward "add mover, remove occupant after" ordering
-        # would ask the real graph to briefly hold 3 ions where only 2
-        # fit. shaw's `_occupant` dict was already cleared for this
-        # slot by the time we're called, but `_phi` hasn't been -- so
-        # we can still identify the straggler by identity (whoever's
-        # `_phi` still points here) and vacate them from the real
-        # graph first, before adding the incoming qudit.
-        dst_node = self._qccd.get_node(new_real)
-        if not dst_node.has_capacity():
-            straggler = next(
-                (q for q, p in self._phi.items() if p == position and q != qudit),
-                None,
-            )
-            if straggler is not None:
-                self._qccd.remove_ion(straggler, new_real)
-                # The straggler is now physically gone from the real
-                # graph, but the *second* place() call for them (still
-                # to come, for the other half of this swap) doesn't
-                # know that yet -- it would otherwise try to remove
-                # them from `new_real` a second time and hit a
-                # "not present" error. Clearing their `_phi` entry here
-                # makes that later call see "no previous position",
-                # which correctly skips straight to a fresh placement.
-                del self._phi[straggler]
-
-        if prev_position is None:
-            self._qccd.place_ion(qudit, new_real)
-        else:
-            prev_real = self._real_of(prev_position)
-            if prev_real != new_real:
-                self._qccd.remove_ion(qudit, prev_real)
-                self._qccd.place_ion(qudit, new_real)
-            # else: same real node, nothing changes physically --
-            # only the virtual slot label is being reassigned.
-
+        self._qccd.place_ion(qudit, self._real_of(position))
         self._phi[qudit] = position
         self._occupant[position] = qudit
+
+    def swap(self, qudit_a: Any, qudit_b: Any) -> None:
+        """Exchange the positions of two placed qudits."""
+        pos_a, pos_b = self._phi[qudit_a], self._phi[qudit_b]
+        real_a, real_b = self._real_of(pos_a), self._real_of(pos_b)
+        if real_a != real_b:
+            self._qccd.remove_ion(qudit_a, real_a)
+            self._qccd.remove_ion(qudit_b, real_b)
+            self._qccd.place_ion(qudit_a, real_b)
+            self._qccd.place_ion(qudit_b, real_a)
+        self._phi[qudit_a], self._phi[qudit_b] = pos_b, pos_a
+        self._occupant[pos_a], self._occupant[pos_b] = qudit_b, qudit_a
 
     def move(self, qudit: Any, new_position: Slot) -> None:
         """Pure shuttle to a free slot -- mirrors via qccd's move_ion,
