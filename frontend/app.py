@@ -428,21 +428,22 @@ with st.sidebar:
         num_traps     = st.slider("Traps", min_value=2, max_value=8, value=4, step=1)
         trap_capacity = st.selectbox("Ions per Trap", options=[1, 2], index=1)
 
-    with st.expander("Congestion Thresholds", expanded=True):
-        kappa_th = st.slider("Local Contention (κ_th)", 0.0, 0.80, 0.0, 0.05)
-        rho_th   = st.slider("Routing Regret (ρ_th)",  0.0, 0.80, 0.0, 0.05)
-        depth_th = st.number_input("Blockage Depth (d_max)", min_value=0, max_value=5, value=2, step=1)
+    with st.expander("When to use QUBO", expanded=False):
+        kappa_th = st.slider("Contention κ", 0.0, 0.80, 0.0, 0.05,
+                             help="How crowded the path is (share of occupied positions)")
+        rho_th   = st.slider("Regret ρ", 0.0, 0.80, 0.0, 0.05,
+                             help="Estimated extra cost of the greedy walk, relative to path length")
+        depth_th = st.number_input("Blockage depth d", min_value=0, max_value=5, value=2, step=1,
+                                   help="Levels of blockers standing behind other blockers")
 
     with st.expander("QUBO Solver", expanded=False):
         solver_mode = st.radio("Engine", ["Tabu Search", "Simulated Annealing"], index=0)
-        num_reads   = st.number_input("Reads", min_value=1, max_value=200, value=2, step=1)
         tabu_effort = st.number_input("Tabu iterations per variable", min_value=100, max_value=20000, value=4000, step=500)
 
 
 def make_solver(seed=None) -> QUBOSolver:
     return QUBOSolver(
         method="tabu" if solver_mode == "Tabu Search" else "sa",
-        num_reads=int(num_reads),
         tabu_effort=int(tabu_effort),
         seed=seed,
     )
@@ -457,7 +458,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-tab1, tab2 = st.tabs(["Hardware Topology", "Live Routing & Benchmarks"])
+tab1, tab2 = st.tabs(["Hardware", "Routing demo"])
 
 
 # ===========================================================================
@@ -533,15 +534,21 @@ with tab1:
 with tab2:
     demo_mode = st.radio(
         "Mode",
-        ["QASM Benchmark Execution", "Single Window Deep Dive"],
+        ["Compile a circuit", "Explain one congestion event"],
         horizontal=True,
     )
-    st.write("")
+    st.caption(
+        "Compile a circuit: route a benchmark circuit with the standard router and with "
+        "selective QUBO, and compare."
+        if demo_mode == "Compile a circuit" else
+        "Explain one congestion event: follow a single blocked path through the pipeline, "
+        "from the congestion metrics to the QUBO plan."
+    )
 
     # -----------------------------------------------------------------------
     # MODE A — QASM Benchmark
     # -----------------------------------------------------------------------
-    if demo_mode == "QASM Benchmark Execution":
+    if demo_mode == "Compile a circuit":
         curated = [
             ("01. 168_random_7q.qasm (7 Qubits)",       "168_random_7q.qasm"),
             ("02. 043_chain_16q.qasm (16 Qubits)",      "043_chain_16q.qasm"),
@@ -656,7 +663,7 @@ with tab2:
     # -----------------------------------------------------------------------
     else:
         with st.container(border=True):
-            st.markdown("#### Single Window Deep Dive")
+            st.markdown("#### One congestion event")
             scenario = st.selectbox(
                 "Shuttling Scenario",
                 [
