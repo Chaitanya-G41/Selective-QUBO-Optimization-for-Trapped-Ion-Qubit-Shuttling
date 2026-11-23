@@ -72,6 +72,15 @@ class RunMetrics:
     movement_time_us: float = 0.0   # shuttling time under TIME_COSTS_US
     depth: int = 0                  # routed-circuit depth (markers included)
 
+    qubo_build_time_s: float = 0.0
+    qubo_solve_time_s: float = 0.0
+    qubo_decode_time_s: float = 0.0
+    qubo_early_optimal: int = 0
+    selected_route: str = ""
+    planning_mode: str = "qubo"
+    qubo_solved: int = 0
+    incumbent_plans: int = 0
+
     @property
     def total_ops(self) -> int:
         return self.total_shuttle_ops + self.swap_count
@@ -222,7 +231,7 @@ class BenchmarkRunner:
         success, error_msg = True, ""
         try:
             asyncio.run(shaw.run(routed, PassData(routed)))
-        except RuntimeError as exc:
+        except (RuntimeError, ValueError) as exc:
             success, error_msg = False, str(exc)
             logger.warning("Routing failed for %s: %s", circuit_name, exc)
         elapsed = time.perf_counter() - started
@@ -250,6 +259,14 @@ class BenchmarkRunner:
             error_msg=error_msg,
             movement_time_us=shaw.movement_time_us if success else 0.0,
             depth=routed.depth if success else 0,
+            qubo_build_time_s=stats["build_time_s"],
+            qubo_solve_time_s=stats["solve_time_s"],
+            qubo_decode_time_s=stats["decode_time_s"],
+            qubo_early_optimal=stats["early_optimal"],
+            planning_mode=handler.planning_mode,
+            qubo_solved=stats["qubo_solved"],
+            incumbent_plans=stats["incumbent_plans"],
+            selected_route=shaw.portfolio_stats.get("selected", "hybrid" if hybrid else "baseline"),
         )
 
     def run_baseline(self, circuit_name: str, circuit: Circuit) -> RunMetrics:
@@ -520,6 +537,16 @@ def _parse_args():
                         help="run a solver-seed study instead of a single benchmark")
     parser.add_argument("--fast", action="store_true",
                         help="learned trigger: skip low-slack windows (much faster)")
+    parser.add_argument("--planner", choices=["qubo", "incumbent"], default="qubo",
+                        help="incumbent skips QUBO formulation/search for low latency")
+    parser.add_argument("--tabu-effort", type=int, default=4000,
+                        help="tabu effort per variable; 200 is an opt-in lower-latency preset")
+    parser.add_argument("--no-baseline-guard", action="store_true",
+                        help="measure raw selective QUBO; allows whole-circuit regressions")
+    parser.add_argument("--max-horizon", type=int, default=24,
+                        help="skip larger time-expanded windows; 0 disables the limit")
+    parser.add_argument("--max-bqm-variables", type=int, default=3000,
+                        help="skip solving larger BQMs including auxiliaries; 0 disables the limit")
     parser.add_argument("--objective", choices=["ops", "time"], default="ops",
                         help="what the QUBO minimises: operation count or shuttling time")
     return parser.parse_args()
@@ -528,12 +555,21 @@ def _parse_args():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.WARNING)
     args = _parse_args()
-    handler_options: Dict[str, Any] = {"learned_trigger": args.fast}
+    if args.tabu_effort <= 0 or args.max_horizon < 0 or args.max_bqm_variables < 0:
+        raise SystemExit("Effort must be positive and model budgets nonnegative")
+    handler_options: Dict[str, Any] = {
+        "learned_trigger": args.fast,
+        "planning_mode": args.planner,
+        "solver_options": {"tabu_effort": args.tabu_effort},
+        "max_time_horizon": args.max_horizon,
+        "max_bqm_variables": args.max_bqm_variables,
+    }
     if args.objective == "time":
         handler_options["cost_model"] = TIME_COSTS_US
     kwargs = dict(qubo_enabled=args.mode == "both", kappa_threshold=args.kappa,
                   rho_threshold=args.rho, architecture=args.arch, jobs=args.jobs,
-                  handler_options=handler_options)
+                  handler_options=handler_options,
+                  pass_options={"baseline_guard": not args.no_baseline_guard})
     if args.seeds:
         seed_study(args.seeds, **kwargs)
     else:

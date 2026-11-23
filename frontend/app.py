@@ -24,7 +24,7 @@ from congestion_handler import CongestionHandler, seed_from, walk_trajectories
 from qubo_formulator  import QUBOFormulator
 from qubo_solver      import QUBOSolver
 from solution_decoder import SolutionDecoder
-from benchmark_runner import BenchmarkRunner
+from benchmark_runner import BenchmarkRunner, load_qasm_circuit
 from walk_planner     import plan_walk, walk_cost
 
 # ---------------------------------------------------------------------------
@@ -41,20 +41,14 @@ _QREG_PAT = _re.compile(r"^qubit\[(\d+)\] q;$")
 
 def load_qasm(name: str):
     """Parse one QASM corpus file → (num_qudits, ops). Supports h / cx only."""
-    path = Path(TESTS_DIR) / name
-    lines = [ln.strip() for ln in path.read_text().splitlines() if ln.strip()]
-    m = _QREG_PAT.match(lines[2])
-    if not m:
-        raise ValueError(f"{name}: unexpected qubit register line: {lines[2]!r}")
-    num_qudits = int(m.group(1))
+    circuit = load_qasm_circuit(Path(TESTS_DIR) / name)
     ops = []
-    for ln in lines[3:]:
-        mh, mc = _H_PAT.match(ln), _CX_PAT.match(ln)
-        if mh:
-            ops.append(("h", int(mh.group(1))))
-        elif mc:
-            ops.append(("cx", int(mc.group(1)), int(mc.group(2))))
-    return num_qudits, ops
+    for operation in circuit.operations():
+        if isinstance(operation.gate, _HGate):
+            ops.append(("h", int(operation.location[0])))
+        else:
+            ops.append(("cx", *(int(q) for q in operation.location)))
+    return circuit.num_qudits, ops
 
 
 def build_circuit(num_qudits: int, ops) -> _Circuit:
@@ -437,6 +431,8 @@ with st.sidebar:
                                    help="Levels of blockers standing behind other blockers")
 
     with st.expander("QUBO Solver", expanded=False):
+        routing_mode = st.radio("Routing policy", ["Full QUBO search", "Fast greedy improvement"], index=0,
+                                help="Fast mode skips QUBO construction and search. Both retain the baseline safeguard.")
         solver_mode = st.radio("Engine", ["Tabu Search", "Simulated Annealing"], index=0)
         tabu_effort = st.number_input("Tabu iterations per variable", min_value=100, max_value=20000, value=4000, step=500)
 
@@ -597,19 +593,28 @@ with tab2:
                     kappa_threshold=kappa_th,
                     rho_threshold=rho_th,
                     architecture=architecture,
+                    handler_options={
+                        "depth_threshold": int(depth_th),
+                        "planning_mode": "qubo" if routing_mode == "Full QUBO search" else "incumbent",
+                        "solver_options": {
+                            "method": "tabu" if solver_mode == "Tabu Search" else "sa",
+                            "tabu_effort": int(tabu_effort),
+                        },
+                    },
                 )
                 baseline = runner._route(selected_file, circuit, hybrid=False)
                 metrics  = runner._route(selected_file, circuit, hybrid=True)
 
             base_ops = baseline.total_shuttle_ops + baseline.swap_count
             qubo_ops = metrics.total_shuttle_ops + metrics.swap_count
+            st.caption(f"Selected complete route: {metrics.selected_route}; planning mode: {metrics.planning_mode}. Compile time includes the baseline safeguard.")
             gain = (base_ops - qubo_ops) / base_ops * 100 if base_ops else 0.0
             c1, c2, c3, c4, c5 = st.columns(5)
             c1.metric("Qubits",             str(metrics.num_qudits))
             c2.metric("Baseline Ops",       str(base_ops))
             c3.metric("Selective-QUBO Ops", str(qubo_ops), delta=f"{gain:+.1f}%")
-            c4.metric("QUBO Triggers",      str(metrics.qubo_triggers))
-            c5.metric("QUBO Accepted",      str(metrics.qubo_accepted))
+            c4.metric("QUBO Triggers" if metrics.planning_mode == "qubo" else "Local Plans Considered",      str(metrics.qubo_triggers))
+            c5.metric("QUBO Accepted" if metrics.planning_mode == "qubo" else "Local Plans Used",      str(metrics.qubo_accepted))
 
             st.write("")
             if metrics.qubo_accepted > 0:
