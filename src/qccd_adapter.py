@@ -189,6 +189,8 @@ class QccdPlacementAdapter:
 
     def swap(self, qudit_a: Any, qudit_b: Any) -> None:
         """Exchange the positions of two placed qudits."""
+        from walk_planner import validate_operation
+        validate_operation(self._adapter, self, ("swap", qudit_a, qudit_b))
         pos_a, pos_b = self._phi[qudit_a], self._phi[qudit_b]
         real_a, real_b = self._real_of(pos_a), self._real_of(pos_b)
         if real_a != real_b:
@@ -202,6 +204,8 @@ class QccdPlacementAdapter:
     def move(self, qudit: Any, new_position: Slot) -> None:
         """Pure shuttle to a free slot -- mirrors via qccd's move_ion,
         which validates the real edge + destination capacity for us."""
+        from walk_planner import validate_operation
+        validate_operation(self._adapter, self, ("move", qudit, new_position))
         if new_position in self._occupant:
             raise ValueError(f"position {new_position!r} is already occupied")
 

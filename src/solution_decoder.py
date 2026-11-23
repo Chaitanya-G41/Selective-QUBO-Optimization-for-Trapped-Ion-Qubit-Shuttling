@@ -129,6 +129,12 @@ class SolutionDecoder:
             if len(set(occupied)) != len(occupied):
                 raise InvalidSample("capacity", f"two ions share a position at t={t}")
 
+        for ion, start in window.active_ions.items():
+            end = traj[ion][-1]
+            if G.nodes[end].get("trap_id") is None:
+                raise InvalidSample("final_position", f"ion {ion} ends on transport")
+            if start in window.goal_nodes and end not in window.goal_nodes:
+                raise InvalidSample("gate_feasibility", f"goal resident {ion} left its trap")
         if traj[window.mover][-1] not in window.goal_nodes:
             raise InvalidSample("gate_feasibility", f"mover ends at {traj[window.mover][-1]}")
 

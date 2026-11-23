@@ -44,4 +44,8 @@ def test_time_cost_prices_each_primitive():
     pg, pl = _home_chain(2)
     ops = [("move", 0, "t0:1"), ("move", 0, "seg0")]  # in-trap move, then split
     assert ops_cost(pg, pl, ops, TIME_COSTS_US) == TIME_COSTS_US["swap"] + TIME_COSTS_US["merge_split"]
+    pl.move(1, "t1:1")
+    pl.move(0, "t0:1")
+    pl.move(0, "seg0")
+    pl.move(0, "t1:0")
     assert ops_cost(pg, pl, [("swap", 0, 1)], TIME_COSTS_US) == TIME_COSTS_US["ion_swap"]

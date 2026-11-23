@@ -138,12 +138,16 @@ class Placement:
         self._occupant: dict[str, int] = {}      # position -> qudit
 
     def place(self, qudit: int, position: str) -> None:
+        if position not in self._pg.graph or qudit in self._phi:
+            raise ValueError("Unknown position or already placed qudit")
         if position in self._occupant:
             raise ValueError(f"position '{position}' is already occupied")
         self._phi[qudit] = position
         self._occupant[position] = qudit
 
     def move(self, qudit: int, new_position: str) -> None:
+        from walk_planner import validate_operation
+        validate_operation(self._pg, self, ("move", qudit, new_position))
         if new_position in self._occupant:
             raise ValueError(
                 f"cannot move qudit {qudit} to '{new_position}': occupied "
@@ -156,6 +160,8 @@ class Placement:
 
     def swap(self, qudit_a: int, qudit_b: int) -> None:
         """Exchange the positions of two placed qudits."""
+        from walk_planner import validate_operation
+        validate_operation(self._pg, self, ("swap", qudit_a, qudit_b))
         pos_a, pos_b = self._phi[qudit_a], self._phi[qudit_b]
         self._phi[qudit_a], self._phi[qudit_b] = pos_b, pos_a
         self._occupant[pos_a], self._occupant[pos_b] = qudit_b, qudit_a
