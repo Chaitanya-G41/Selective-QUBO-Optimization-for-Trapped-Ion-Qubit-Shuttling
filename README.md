@@ -5,19 +5,29 @@
 [![Framework: BQSKit](https://img.shields.io/badge/Compiler-BQSKit-purple.svg)](https://bqskit.lbl.gov/)
 [![Optimization: dimod](https://img.shields.io/badge/QUBO-dimod%20%2F%20dwave--samplers-green.svg)](https://github.com/dwavesystems/dimod)
 [![UI: Streamlit](https://img.shields.io/badge/Dashboard-Streamlit-red.svg)](https://streamlit.io/)
-[![Tests: 71 Passed](https://img.shields.io/badge/Tests-71%20Passed-brightgreen.svg)](tests/)
+[![Tests: 84 Passed](https://img.shields.io/badge/Tests-84%20Passed-brightgreen.svg)](tests/)
 
 > **Minimal Working Prototype & Compiler Pipeline**: A hybrid quantum compilation framework combining fast heuristic routing (SHAW) with localized **Quadratic Unconstrained Binary Optimization (QUBO)** to eliminate shuttling bottlenecks in Trapped-Ion Quantum Charge-Coupled Device (QCCD) architectures.
 
 ---
 
-## 📌 Project Overview
+## Local implementation update (23 November 2026)
+
+Routing now enforces legal hops and restricts occupied exchanges to in-trap swap edges. Blocked transport positions are cleared through vacancies; saturated corridors use a bounded local search with expanding radius. Both the heuristic baseline and selective QUBO use these rules.
+
+Selective routing now compares its complete route with an independently compiled baseline and keeps the cheaper result under the configured physical-operation objective. `ShawRoutingPass(baseline_guard=False)` exposes the raw hybrid for research; it can regress globally. Portfolio compilation time includes both candidates. Historical results below predate these legality corrections and must not be treated as validated results for this version.
+
+For lower latency, select **Fast greedy improvement** in the dashboard, or pass `--planner incumbent` to either benchmark CLI. This deterministic mode skips QUBO formulation and solving; it is reported separately from QUBO search.
+
+See [IMPLEMENTATION_RESULTS.md](IMPLEMENTATION_RESULTS.md) for changes, measurements, limits, and reproduction commands. Structured QFT, QAOA, VQE, GHZ, and parity-interaction benchmarks are available through `experiments/benchmark_families.py`. The parity workload has no measurement/reset and is not a complete QEC cycle.
+
+##  Project Overview
 
 ### The Trapped-Ion Shuttling Bottleneck
 In trapped-ion quantum computers, physical ions are trapped in micro-fabricated electrode arrays. Multi-qubit entangling gates require physical ions to be **shuttled** into shared interaction zones across the QCCD architecture:
 - **Ion Heating & Dephasing**: Every shuttle hop causes kinetic heating and motional dephasing, degrading gate fidelity.
 - **Congestion & Deadlocks**: Narrow transfer segments and multi-ion trap capacity constraints cause severe bottlenecks under high multi-qubit gate contention. Purely greedy heuristics (e.g., A* or basic SHAW) struggle with cascading blockages, leading to high routing regret or swap deadlocks.
-- **Global QUBO Scaling Barrier**: Formulating the entire shuttling routing problem across an entire chip into a single global QUBO matrix scales exponentially ($O(N_{\text{ions}} \cdot |V| \cdot T)$), making classical simulated annealing or QPU execution impractically slow for realistic quantum circuits.
+- **Global QUBO Scaling Barrier**: Formulating the entire shuttling routing problem across an entire chip into a single global QUBO matrix has $O(N_{\text{ions}} \cdot |V| \cdot T)$ position variables before auxiliary variables; exhaustive solution scales exponentially in the number of binary variables, making classical simulated annealing or QPU execution impractically slow for realistic quantum circuits.
 
 ### The QubRoute Solution: Selective QUBO Optimization
 **QubRoute** introduces a selective, hybrid paradigm:
@@ -25,14 +35,14 @@ In trapped-ion quantum computers, physical ions are trapped in micro-fabricated 
 2. **Real-Time Contention Monitoring**: When a path is blocked, the router computes three congestion metrics: Local Contention ($\kappa$), Routing Regret ($\rho$), and Blockage Depth ($d$).
 3. **Selective QUBO Escalation**: If the trigger fires and the greedy walk is *not provably optimal* (its cost exceeds the lower bound), the system builds a QUBO that plans the moves of **every ion in the window $W$** and solves it with tabu search, warm-started from the greedy walk. Long paths are planned window by window.
 4. **Explicit Validation**: Every candidate sample is decoded and checked against the physical rules (one-hot, start positions, movement legality, capacity, no exchanges over transport, goal reached, schedulable) instead of trusting its energy.
-5. **Never Worse Locally**: A plan is executed only if it needs fewer physical operations than the greedy walk on the same board and leaves ions no further from their next gate partners. Otherwise the greedy walk runs.
-6. **Best of Both (optional)**: Compiling a circuit both ways and keeping the cheaper result is never worse than the baseline.
+5. **Never Worse Locally**: A plan is executed only if it needs fewer physical operations than the greedy walk on the same board and does not increase aggregate distance to the next gate partners, evaluated using both partners' candidate positions. Otherwise the greedy walk runs.
+6. **Whole-circuit safeguard (default)**: Compile both complete routes and keep the cheaper result under the configured cost model. Both compile times are included. Disable it only to measure raw selective routing.
 
 The prototype includes both a **complete compilation backend** and an **interactive Streamlit web dashboard** for circuit execution and mathematical visualization.
 
 ---
 
-## 💻 Source Code Structure
+##  Source Code Structure
 
 ```text
 Selective-QUBO-Optimization-for-Trapped-Ion-Qubit-Shuttling/
@@ -52,7 +62,7 @@ Selective-QUBO-Optimization-for-Trapped-Ion-Qubit-Shuttling/
 │   ├── app.py                         # Streamlit application (Topology & Live Routing tabs)
 │   └── README.md                      # Frontend-specific documentation and usage instructions
 ├── .streamlit/                        # Streamlit configuration
-├── tests/                             # 71 unit & integration tests + 200 OpenQASM benchmark circuits
+├── tests/                             # 84 unit & integration tests + 200 OpenQASM benchmark circuits
 ├── experiments/
 │   ├── optimality_gap.py              # Tabu vs exact MILP optimum on real windows
 │   ├── learn_trigger.py               # Learns which windows are worth solving
@@ -67,7 +77,7 @@ Selective-QUBO-Optimization-for-Trapped-Ion-Qubit-Shuttling/
 
 ---
 
-## 🚀 Setup & Installation Instructions
+##  Setup & Installation Instructions
 
 ### Prerequisites
 - **Python 3.10+** (Tested on Python 3.10.11)
@@ -107,7 +117,7 @@ All 71 unit and integration tests should pass.
 
 ---
 
-## 🖥️ Running the Prototype
+## ️ Running the Prototype
 
 ### Option A: Interactive Web Application (QubRoute GUI)
 Launch the interactive Streamlit dashboard:
@@ -144,7 +154,7 @@ Results go to `experiments/results/comparison[_arch].csv` and `experiments/plots
 
 ---
 
-## ⚙️ Implementation Details
+## ️ Implementation Details
 
 ### 1. Architectural Abstraction: The Position Graph ($G_p$)
 The QCCD hardware is abstracted as an undirected graph $G_p = (V, E)$ (`src/position_graph.py`):
@@ -201,7 +211,7 @@ Physical movement is recorded as identity markers: `IdentityGate(1)` per shuttle
 
 ---
 
-## 📊 Benchmark Results
+##  Benchmark Results
 
 All 200 OpenQASM circuits in `tests/`, one home ion per trap (capacity 2). Cost = total physical operations (shuttles + ion swaps); negative change = fewer operations. "Best of both" keeps the cheaper of the two compiled circuits. Reproduce with `python src/benchmark_runner.py --arch <arch>`.
 
@@ -250,7 +260,7 @@ What the numbers say:
 
 ---
 
-## 📜 References & Acknowledgments
+##  References & Acknowledgments
 
 - **SHAW Router**: Bach, Safro, Younis – *"Efficient Compilation for Shuttling Trapped-Ion Machines via the Position Graph Architectural Abstraction"*, arXiv:2501.12470 (ACM TQC 2026).
 - **QUBO Formulation**: Glover, Kochenberger, Du – *"A Tutorial on Formulating and Using QUBO Models"*, arXiv:1811.11538 (2019).
@@ -259,5 +269,5 @@ What the numbers say:
 
 ---
 
-## 📄 License
+##  License
 This project is open-source under the **MIT License**. See `LICENSE` for details.
