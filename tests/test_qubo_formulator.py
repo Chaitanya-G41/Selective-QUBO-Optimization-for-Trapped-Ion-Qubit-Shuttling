@@ -63,9 +63,9 @@ def test_valid_plan_energy_equals_hop_count():
         1: ["t1:0", "t1:1", "t1:1", "t1:1", "t1:0"],
         2: ["t2:0", "t2:1"],
     }
-    # 6 mover hops + 2 (ion 1, one of them in the swap) + 1 (ion 2) = 9,
+    # 9 individual hops include one two-ion swap, priced as one op: 8,
     # plus the settle tie-break 1/(#ions+1) because ion 2 ends off its start.
-    assert p.bqm.energy(_sample(p, traj)) == pytest.approx(9.0 + 1 / 4)
+    assert p.bqm.energy(_sample(p, traj)) == pytest.approx(8.0 + 1 / 4)
 
 
 def test_violations_cost_at_least_one_penalty():
@@ -101,3 +101,25 @@ def test_infeasible_window_raises():
     )
     with pytest.raises(InfeasibleWindow):
         QUBOFormulator().build(window, pg)
+
+@pytest.mark.parametrize('costs', [
+    {'swap': 1., 'merge_split': 1., 'move': 1., 'ion_swap': 1.},
+    {'swap': 10., 'merge_split': 80., 'move': 10., 'ion_swap': 42.},
+])
+def test_swap_objective_matches_scheduled_physical_cost(costs):
+    from position_graph import Placement
+    from solution_decoder import SolutionDecoder
+    from walk_planner import ops_cost
+    pg, problem = _problem(costs=costs)
+    traj = {
+        0: ['t0:0', 't0:1', 'seg0', 't1:0', 't1:1', 'seg1', 't2:0'],
+        1: ['t1:0', 't1:1', 't1:1', 't1:1', 't1:0'],
+        2: ['t2:0', 't2:1'],
+    }
+    sample = _sample(problem, traj)
+    plan = SolutionDecoder().to_plan(sample, problem)
+    board = Placement(pg)
+    for ion, pos in problem.window.active_ions.items():
+        board.place(ion, pos)
+    settle = min(costs[label] for label in ('swap', 'merge_split', 'move')) / 4
+    assert problem.bqm.energy(sample) == pytest.approx(ops_cost(pg, board, plan.ops, costs) + settle)

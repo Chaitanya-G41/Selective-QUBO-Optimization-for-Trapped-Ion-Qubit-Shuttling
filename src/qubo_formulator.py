@@ -32,7 +32,7 @@ Energy  E = H_cost + P * (H_one_hot + H_capacity + H_movement + H_crossing)
 
 P exceeds the largest possible objective, so any constraint violation
 costs more than every feasible plan; a feasible sample's energy is its
-hop cost plus the terminal terms. Rosenberg penalties use 2P so an auxiliary variable
+physical operation cost plus the terminal terms. Rosenberg penalties use 2P so an auxiliary variable
 can never "cheat" a product term.
 """
 
@@ -215,7 +215,7 @@ class QUBOFormulator:
             max(terminal.get((ion, v, T), 0.0) for v in states[ion, T]) for ion in ions
         )
         P = (self.penalty if self.penalty is not None
-             else max(hop.values()) * (1.0 + len(ions) * T) + max_terminal)
+             else max(*hop.values(), self.costs["ion_swap"]) * (1.0 + len(ions) * T) + max_terminal)
         bqm = _Terms(var_map.values())
         x = var_map
 
@@ -253,7 +253,7 @@ class QUBOFormulator:
         for key, cost in terminal.items():
             bqm.add_linear(x[key], cost)
 
-        # ---- no exchanges over transport edges --------------------------
+        # ---- exchanges: exact swap cost inside traps, forbidden outside --
         products: Dict[FrozenSet[str], str] = {}
         aux_products: Dict[str, Tuple[str, str]] = {}
 
@@ -272,8 +272,6 @@ class QUBOFormulator:
             return products[key]
 
         for u, v, label in G.edges(data="label"):
-            if label == "swap":
-                continue
             for t in range(T):
                 for a in moves.get((t, u, v), ()):
                     for b in moves.get((t, v, u), ()):
@@ -281,7 +279,10 @@ class QUBOFormulator:
                             continue
                         za = product(x[a, u, t], x[a, v, t + 1])
                         zb = product(x[b, v, t], x[b, u, t + 1])
-                        bqm.add_quadratic(za, zb, P)
+                        # The two individual hop prices are already charged.
+                        # An in-trap exchange is one physical operation.
+                        correction = self.costs["ion_swap"] - 2 * hop["swap"] if label == "swap" else P
+                        bqm.add_quadratic(za, zb, correction)
 
         return QUBOProblem(
             bqm=bqm.to_bqm(),

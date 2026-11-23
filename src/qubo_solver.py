@@ -111,9 +111,19 @@ class QUBOSolver:
         elapsed = time.perf_counter() - t0
 
         best = list(sampleset.aggregate().truncate(self.max_candidates).data(["sample", "energy"]))
+        samples = [dict(row.sample) for row in best]
+        energies = [float(row.energy) for row in best]
+        # A stochastic sampler may discard even a valid, cheaper warm start.
+        # Keep it independently of the energy-ranked candidate limit.
+        if initial_state is not None:
+            initial = problem.complete(initial_state)
+            if initial not in samples:
+                samples.append(initial)
+                energies.append(float(bqm.energy(initial)))
+        ranked = sorted(zip(energies, samples), key=lambda pair: pair[0])
         return QUBOSolution(
-            samples=[dict(row.sample) for row in best],
-            energies=[float(row.energy) for row in best],
+            samples=[sample for _, sample in ranked],
+            energies=[energy for energy, _ in ranked],
             solver_used=used,
             solve_time_s=elapsed,
             problem=problem,

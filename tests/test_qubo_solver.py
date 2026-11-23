@@ -62,3 +62,14 @@ def test_leap_explains_missing_setup():
 def test_rejects_unknown_method():
     with pytest.raises(ValueError):
         QUBOSolver(method="quantum")
+
+
+def test_sampler_cannot_discard_warm_incumbent(monkeypatch):
+    solver = QUBOSolver(max_candidates=1)
+    start = {f'x{i}': int(i % 3 == 0) for i in range(25)}
+    bad = {f'x{i}': 0 for i in range(25)}
+    monkeypatch.setattr(solver, '_tabu', lambda bqm, initial_state:
+        dimod.SampleSet.from_samples_bqm(bad, bqm))
+    result = solver.solve(_problem(LARGE), initial_state=start)
+    assert result.samples[0] == start
+    assert bad in result.samples

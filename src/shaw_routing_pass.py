@@ -27,6 +27,8 @@ quantum states, so emitting a logical SwapGate would be wrong.
 from __future__ import annotations
 
 import logging
+import copy
+import time
 from collections import deque
 from typing import Deque, Dict, List, Optional, Tuple
 
@@ -38,7 +40,7 @@ from bqskit.ir.gates import IdentityGate
 from circuit_dag import CircuitDAG
 from congestion_handler import CongestionHandler, Resolution
 from position_graph import Placement, PositionGraph, build_linear_qccd
-from walk_planner import TIME_COSTS_US, op_cost, plan_walk, trap_of, walk_cost
+from walk_planner import TIME_COSTS_US, op_cost, plan_walk, trap_of, walk_cost, walk_ops, BoardView
 
 logger = logging.getLogger("shaw_router")
 
@@ -57,15 +59,77 @@ class ShawRoutingPass(BasePass):
         position_graph: Optional[PositionGraph] = None,
         placement: Optional[Placement] = None,
         congestion_handler: Optional[CongestionHandler] = None,
+        baseline_guard: bool = True,
     ) -> None:
         super().__init__()
         self._position_graph = position_graph
         self._placement = placement
         self.congestion_handler = congestion_handler or CongestionHandler()
         self.movement_time_us = 0.0  # under walk_planner.TIME_COSTS_US
+        self.baseline_guard = baseline_guard
+        self.movement_trace = []
+        self.routing_cost = 0.0
+        self.portfolio_stats = {}
 
     async def run(self, circuit: Circuit, data: PassData) -> None:
+        """Route locally; optionally retain the cheaper complete baseline route.
+
+        Both candidates use independent boards. Only the selected legal trace
+        is replayed on a caller-supplied placement. All portfolio work is part
+        of this call's compile latency.
+        """
+        if not self.baseline_guard or not self.congestion_handler.qubo_enabled:
+            await self._run(circuit, data)
+            return
+        if any(len(op.location) > 2 for op in circuit.operations()):
+            raise ValueError("Decompose gates with more than two qudits before routing")
+        pg, placement = self._get_or_build_machine_model(circuit)
+        candidates = []
+        errors = []
+        started = time.perf_counter()
+        for hybrid in (False, True):
+            candidate_pg, candidate_board = copy.deepcopy((pg, placement))
+            handler = self.congestion_handler if hybrid else CongestionHandler(
+                qubo_enabled=False, cost_model=self.congestion_handler.costs,
+                max_reroute_candidates=self.congestion_handler.max_reroute_candidates)
+            router = ShawRoutingPass(candidate_pg, candidate_board, handler, baseline_guard=False)
+            routed = circuit.copy()
+            try:
+                await router._run(routed, PassData(routed))
+                candidates.append((router.routing_cost, hybrid, router, routed))
+            except (ValueError, RuntimeError) as exc:
+                errors.append((hybrid, str(exc)))
+        if not candidates:
+            raise RuntimeError(f"Both routing candidates failed: {errors}")
+        # Baseline wins cost ties: avoids gratuitous layout differences.
+        _, hybrid, chosen, routed = min(candidates, key=lambda c: (c[0], c[1]))
+        BoardView(pg, placement).apply(chosen.movement_trace)
+        for kind, a, b in chosen.movement_trace:
+            if kind == "move":
+                placement.move(a, b)
+            else:
+                placement.swap(a, b)
+        circuit.become(routed)
+        self.movement_trace = list(chosen.movement_trace)
+        self.routing_cost = chosen.routing_cost
+        self.movement_time_us = chosen.movement_time_us
+        self.portfolio_stats = {
+            "selected": "hybrid" if hybrid else "baseline",
+            "candidate_costs": {"hybrid" if h else "baseline": cost for cost, h, _, _ in candidates},
+            "elapsed_s": time.perf_counter() - started,
+            "errors": errors,
+        }
+        self.congestion_handler.stats["portfolio"] = self.portfolio_stats
+        if not hybrid:
+            self.congestion_handler.stats["qubo_executed"] = 0
+
+    async def _run(self, circuit: Circuit, data: PassData) -> None:
         """BQSKit entry point. Mutates `circuit` in place."""
+        if any(len(op.location) > 2 for op in circuit.operations()):
+            raise ValueError("Decompose gates with more than two qudits before routing")
+        self.movement_time_us = 0.0
+        self.routing_cost = 0.0
+        self.movement_trace = []
         pg, placement = self._get_or_build_machine_model(circuit)
 
         dag = CircuitDAG(circuit)
@@ -127,7 +191,7 @@ class ShawRoutingPass(BasePass):
             raw_path = pg.shortest_path(placement.position_of(mover), target_slot)
             hints = self._next_partner_positions(placement, lookahead, dag)
             resolution = self.congestion_handler.resolve_path_congestion(
-                raw_path, placement, pg, hints
+                raw_path, placement, pg, hints, self._next_partner_ions(lookahead, dag)
             )
             self._execute(routed, pg, placement, resolution, mover)
 
@@ -299,6 +363,17 @@ class ShawRoutingPass(BasePass):
                 hints.setdefault(b, placement.position_of(a))
         return hints
 
+    @staticmethod
+    def _next_partner_ions(lookahead_ops, dag):
+        partners = {}
+        for op_id in lookahead_ops:
+            qudits = dag.nodes[op_id].qudits
+            if len(qudits) == 2:
+                a, b = qudits
+                partners.setdefault(a, b)
+                partners.setdefault(b, a)
+        return partners
+
     def _parallelism_bonus(
         self,
         pg: PositionGraph,
@@ -346,7 +421,10 @@ class ShawRoutingPass(BasePass):
         self, routed: Circuit, pg: PositionGraph, placement: Placement, ops: List[tuple]
     ) -> None:
         """Apply a QUBO move plan: ("move", ion, dest) / ("swap", a, b)."""
+        BoardView(pg, placement).apply(ops)  # validate the entire plan before execution
         for op in ops:
+            self.routing_cost += op_cost(pg, placement, op, self.congestion_handler.costs)
+            self.movement_trace.append(op)
             self.movement_time_us += op_cost(pg, placement, op, TIME_COSTS_US)
             if op[0] == "move":
                 _, ion, dest = op
@@ -366,22 +444,7 @@ class ShawRoutingPass(BasePass):
         mover: int,
     ) -> None:
         """Greedy walk of `mover` along `path` (rules in walk_planner.py)."""
-        self.movement_time_us += walk_cost(pg, placement, path, mover, TIME_COSTS_US)
-        for action in plan_walk(pg, placement, path, mover):
-            kind = action[0]
-            if kind == "move":
-                placement.move(mover, action[1])
-                routed.append_gate(SHUTTLE_MARKER, (mover,))
-            elif kind == "vacate":
-                _, occupant, hop, free_slot = action
-                placement.move(occupant, free_slot)
-                routed.append_gate(SHUTTLE_MARKER, (occupant,))
-                placement.move(mover, hop)
-                routed.append_gate(SHUTTLE_MARKER, (mover,))
-            else:  # swap
-                _, occupant, _hop = action
-                placement.swap(mover, occupant)
-                routed.append_gate(ION_SWAP_MARKER, (mover, occupant))
+        self._execute_plan(routed, pg, placement, walk_ops(pg, placement, path, mover))
 
 
 if __name__ == "__main__":

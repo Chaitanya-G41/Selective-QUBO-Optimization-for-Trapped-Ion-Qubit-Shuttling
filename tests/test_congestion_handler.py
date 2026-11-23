@@ -186,7 +186,7 @@ def test_greedy_seed_is_a_valid_plan():
     assert plan.cost == walk_cost(pg, pl, path, 0)
     # Energy of a valid plan = hop count (each in-trap swap counts 2 hops).
     swaps = sum(op[0] == "swap" for op in plan.ops)
-    assert problem.bqm.energy(seed) == pytest.approx(plan.cost + swaps)
+    assert problem.bqm.energy(seed) == pytest.approx(plan.cost)
 
 
 def test_stats_and_summary():
