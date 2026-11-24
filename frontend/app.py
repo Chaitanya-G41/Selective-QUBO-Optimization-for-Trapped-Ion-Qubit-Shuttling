@@ -12,13 +12,25 @@ ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC_DIR  = os.path.join(ROOT_DIR, "src")
 TESTS_DIR = os.path.join(ROOT_DIR, "tests")
 FRONTEND_DIR = os.path.join(ROOT_DIR, "frontend")
+VIEWS_DIR = os.path.join(FRONTEND_DIR, "views")
+EXPERIMENTS_DIR = os.path.join(ROOT_DIR, "experiments")
 
-for d in (FRONTEND_DIR, SRC_DIR, TESTS_DIR, ROOT_DIR):
+for d in (FRONTEND_DIR, VIEWS_DIR, SRC_DIR, TESTS_DIR, EXPERIMENTS_DIR, ROOT_DIR):
     if d not in sys.path:
         sys.path.insert(0, d)
 
 import streamlit as st
 from theme import inject_theme_css, get_current_theme
+
+# Import Views
+from views.overview import render_overview_tab
+from views.hardware import render_hardware_tab
+from views.live_routing import render_live_routing_tab
+from views.deep_dive import render_deep_dive_tab
+from views.qubo_formulation import render_qubo_tab
+from views.benchmarks import render_benchmarks_tab
+from views.optimality import render_optimality_tab
+from views.method_references import render_method_tab
 
 # ---------------------------------------------------------------------------
 # Page configuration
@@ -42,7 +54,7 @@ is_dark = st.session_state["qubroute_theme"] == "dark"
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.markdown("### QubRoute Controls")
-    
+
     # Theme switcher
     theme_choice = st.radio(
         "Theme Mode",
@@ -184,25 +196,43 @@ st.markdown(
 ])
 
 with tab_overview:
-    st.info("Overview tab placeholder — will be populated in Step 3.")
+    render_overview_tab(architecture)
 
 with tab_hardware:
-    st.info("Hardware tab placeholder — will be populated in Step 3.")
+    render_hardware_tab(architecture, num_traps, trap_capacity)
 
 with tab_live_routing:
-    st.info("Live Routing tab placeholder — will be populated in Step 3.")
+    render_live_routing_tab(
+        architecture=architecture,
+        kappa_th=kappa_th,
+        rho_th=rho_th,
+        depth_th=int(depth_th),
+        routing_mode=routing_mode,
+        solver_engine=solver_engine,
+        tabu_effort=int(tabu_effort),
+        solver_seed=int(solver_seed),
+        objective=objective,
+        baseline_guard=baseline_guard,
+        fast_trigger=fast_trigger,
+    )
 
 with tab_deep_dive:
-    st.info("Single Window Deep Dive tab placeholder — will be populated in Step 3.")
+    render_deep_dive_tab(
+        kappa_th=kappa_th,
+        rho_th=rho_th,
+        depth_th=int(depth_th),
+        tabu_effort=int(tabu_effort),
+        solver_seed=int(solver_seed),
+    )
 
 with tab_qubo:
-    st.info("QUBO Formulation tab placeholder — will be populated in Step 3.")
+    render_qubo_tab()
 
 with tab_benchmarks:
-    st.info("Benchmarks tab placeholder — will be populated in Step 3.")
+    render_benchmarks_tab()
 
 with tab_optimality:
-    st.info("Optimality tab placeholder — will be populated in Step 3.")
+    render_optimality_tab()
 
 with tab_methods:
-    st.info("Method & References tab placeholder — will be populated in Step 3.")
+    render_method_tab()
