@@ -110,9 +110,18 @@ def inject_theme_css() -> None:
         letter-spacing: -0.025em !important;
     }}
 
-    p, span, label, div, td, th, [data-testid="stMarkdownContainer"] p {{
+    p, label, td, th, [data-testid="stMarkdownContainer"] p, [data-testid="stText"] {{
         font-family: 'Plus Jakarta Sans', sans-serif !important;
         color: {theme["text"]} !important;
+    }}
+
+    /* Protect Material Icons ligatures */
+    [data-testid="stIconMaterial"], [class*="material-symbols"], [class*="material-icons"],
+    .material-symbols-rounded, .material-symbols-outlined,
+    [data-testid="stSidebarCollapseButton"] span,
+    [data-testid="stExpanderToggleIcon"] span,
+    [data-testid="stExpanderToggleIcon"] {{
+        font-family: 'Material Symbols Rounded', 'Material Icons', sans-serif !important;
     }}
 
     .text-muted, .stCaption, [data-testid="stCaptionContainer"] {{
@@ -196,15 +205,18 @@ def inject_theme_css() -> None:
     }}
 
     /* Tabs */
-    .stTabs [data-baseweb="tab-list"] {{
+    .stTabs [data-baseweb="tab-list"], .stTabs [role="tablist"] {{
         gap: 8px !important;
         border-bottom: 2px solid {theme["panel_border"]} !important;
         padding-bottom: 6px !important;
         margin-bottom: 20px !important;
         background: transparent !important;
+        overflow-x: auto !important;
+        flex-wrap: nowrap !important;
+        scrollbar-width: thin !important;
     }}
 
-    .stTabs [data-baseweb="tab"] {{
+    .stTabs [data-baseweb="tab"], .stTabs [role="tab"] {{
         font-family: 'Plus Jakarta Sans', sans-serif !important;
         font-weight: 600 !important;
         font-size: 0.9rem !important;
@@ -214,14 +226,17 @@ def inject_theme_css() -> None:
         border: 1.5px solid {theme["card_border"]} !important;
         border-radius: 6px !important;
         transition: all 0.15s ease !important;
+        cursor: pointer !important;
+        flex-shrink: 0 !important;
+        white-space: nowrap !important;
     }}
 
-    .stTabs [data-baseweb="tab"]:hover {{
+    .stTabs [data-baseweb="tab"]:hover, .stTabs [role="tab"]:hover {{
         color: {theme["text"]} !important;
         border-color: {theme["rails"]} !important;
     }}
 
-    .stTabs [aria-selected="true"] {{
+    .stTabs [aria-selected="true"], .stTabs [role="tab"][aria-selected="true"] {{
         color: {theme["active_tab_text"]} !important;
         background-color: {theme["active_tab_bg"]} !important;
         border: 1.5px solid {theme["active_tab_bg"]} !important;
@@ -229,7 +244,7 @@ def inject_theme_css() -> None:
         box-shadow: { '0 2px 10px rgba(255, 215, 98, 0.3)' if is_dark else '0 2px 8px rgba(20, 33, 61, 0.2)' } !important;
     }}
 
-    .stTabs [data-baseweb="tab-highlight"] {{
+    .stTabs [data-baseweb="tab-highlight"], .stTabs [role="tab"] ~ span {{
         display: none !important;
     }}
 
@@ -258,28 +273,33 @@ def inject_theme_css() -> None:
         background-color: {theme["panel"]} !important;
         border: 1.5px solid {theme["card_border"]} !important;
         border-radius: 8px !important;
-        padding: 14px 18px !important;
+        padding: 12px 14px !important;
+        min-width: 0 !important;
     }}
 
-    div[data-testid="stMetricLabel"] span,
     div[data-testid="stMetricLabel"] p {{
-        font-size: 0.78rem !important;
+        font-size: 0.72rem !important;
         font-weight: 700 !important;
         color: {theme["muted"]} !important;
         text-transform: uppercase !important;
-        letter-spacing: 0.07em !important;
+        letter-spacing: 0.05em !important;
+        white-space: nowrap !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
     }}
 
     div[data-testid="stMetricValue"] div {{
-        font-size: 1.85rem !important;
+        font-size: 1.35rem !important;
         font-weight: 800 !important;
         color: {theme["text"]} !important;
-        letter-spacing: -0.03em !important;
+        letter-spacing: -0.02em !important;
+        white-space: nowrap !important;
     }}
 
-    div[data-testid="stMetricDelta"] {{
-        font-size: 0.85rem !important;
+    div[data-testid="stMetricDelta"] div {{
+        font-size: 0.76rem !important;
         font-weight: 600 !important;
+        white-space: nowrap !important;
     }}
 
     /* DataFrames / Tables */
