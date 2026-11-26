@@ -43,23 +43,29 @@ def costs_for_ops(pg: Any, start: Dict[Any, Any], ops: List[Dict[str, str]]) -> 
 
 
 def build_csv_strip(architecture: str) -> List[Dict[str, str]]:
-    """Build the 2-item result strip from live CSV data and test count."""
+    """Build the 2-item result strip entirely from the benchmark CSV."""
     try:
         df = load_benchmark_csv(architecture)
         if df.empty:
-            df = load_benchmark_csv("junction_grid")
+            raise ValueError("empty benchmark CSV")
         b_ops = int(df["baseline_total_ops"].sum())
         h_ops = int(df["hybrid_total_ops"].sum())
         pct = (h_ops - b_ops) / b_ops * 100 if b_ops else 0.0
         pct_str = f"{pct:+.1f}%"
+        n = len(df)
+        improved = int((df["hybrid_total_ops"] < df["baseline_total_ops"]).sum())
+        improved_str = f"{improved} of {n}"
+        count_text = f"{n} circuits"
         machine_label = architecture.replace("_", " ")
     except Exception:
         pct_str = "—"
+        improved_str = "—"
+        count_text = "the benchmark circuits"
         machine_label = architecture
 
     return [
-        {"value": pct_str, "label": f"operations over 200 circuits, {machine_label}"},
-        {"value": "84", "label": "tests passing, every plan validated"},
+        {"value": pct_str, "label": f"operations over {count_text}, {machine_label}"},
+        {"value": improved_str, "label": "circuits improved by QUBO"},
     ]
 
 
