@@ -95,6 +95,7 @@ def run_live_compilation(
             "tabu_effort": int(tabu_effort),
         },
         seed=int(solver_seed),
+        record_events=True,
     )
 
     # 1. Baseline Route
@@ -151,7 +152,13 @@ def run_live_compilation(
         "gain_pct": gain_pct,
         "qubo_triggers": stats.get("qubo_triggers", 0),
         "qubo_accepted": stats.get("qubo_executed", 0),
+        "qubo_raw_accepted": stats.get("qubo_accepted", 0),
         "blocked_events": stats.get("blocked_events", 0),
+        "event_records": stats.get("event_records", []),
+        "routed_ops": [
+            f"{op.gate} q{list(op.location)}" for op in circuit_hyb.operations()
+        ][:30],
+        "routed_ops_total": circuit_hyb.num_operations,
         "selected_route": router_hyb.portfolio_stats.get("selected", "hybrid"),
         "initial_phi": init_phi,
         "pg": base_pg,

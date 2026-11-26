@@ -157,14 +157,50 @@ def inject_theme_css() -> None:
 
     [data-testid="stSidebar"] [data-testid="stExpander"] {{
         border: 1px solid {theme["card_border"]} !important;
-        border-radius: 8px !important;
+        border-radius: 6px !important;
         margin-bottom: 10px !important;
         background: {theme["panel"]} !important;
+    }}
+
+    [data-testid="stSidebar"] [data-testid="stExpander"] summary,
+    [data-testid="stSidebar"] [data-testid="stExpander"] summary:hover,
+    [data-testid="stSidebar"] [data-testid="stExpander"] details[open] > summary {{
+        background-color: {theme["panel"]} !important;
+        color: {theme["text"]} !important;
     }}
 
     [data-testid="stSidebar"] [data-testid="stExpander"] summary p {{
         font-weight: 700 !important;
         color: {theme["text"]} !important;
+    }}
+
+    /* Inputs, Selectboxes, Number Inputs (no white boxes in dark mode) */
+    div[data-baseweb="select"] > div,
+    div[data-baseweb="input"] > div,
+    [data-testid="stNumberInput"] > div > div {{
+        background-color: {theme["panel"]} !important;
+        border-color: {theme["card_border"]} !important;
+        color: {theme["text"]} !important;
+    }}
+
+    div[data-baseweb="select"] span,
+    div[data-baseweb="select"] input,
+    [data-testid="stNumberInput"] input {{
+        color: {theme["text"]} !important;
+    }}
+
+    ul[data-baseweb="menu"] {{
+        background-color: {theme["panel"]} !important;
+        border: 1px solid {theme["card_border"]} !important;
+    }}
+
+    ul[data-baseweb="menu"] li {{
+        color: {theme["text"]} !important;
+        background-color: {theme["panel"]} !important;
+    }}
+
+    ul[data-baseweb="menu"] li:hover {{
+        background-color: {theme["card_bg"]} !important;
     }}
 
     /* Brand Header */
@@ -204,12 +240,12 @@ def inject_theme_css() -> None:
         color: {theme["text"]};
     }}
 
-    /* Tabs */
+    /* Tabs — all 8 fit on one line at 1440px, selected label always visible */
     .stTabs [data-baseweb="tab-list"], .stTabs [role="tablist"] {{
-        gap: 8px !important;
-        border-bottom: 2px solid {theme["panel_border"]} !important;
+        gap: 4px !important;
+        border-bottom: 1.5px solid {theme["panel_border"]} !important;
         padding-bottom: 6px !important;
-        margin-bottom: 20px !important;
+        margin-bottom: 18px !important;
         background: transparent !important;
         overflow-x: auto !important;
         flex-wrap: nowrap !important;
@@ -219,12 +255,12 @@ def inject_theme_css() -> None:
     .stTabs [data-baseweb="tab"], .stTabs [role="tab"] {{
         font-family: 'Plus Jakarta Sans', sans-serif !important;
         font-weight: 600 !important;
-        font-size: 0.9rem !important;
+        font-size: 0.78rem !important;
         color: {theme["muted"]} !important;
-        padding: 8px 16px !important;
+        padding: 6px 9px !important;
         background-color: {theme["panel"]} !important;
-        border: 1.5px solid {theme["card_border"]} !important;
-        border-radius: 6px !important;
+        border: 1px solid {theme["card_border"]} !important;
+        border-radius: 4px !important;
         transition: all 0.15s ease !important;
         cursor: pointer !important;
         flex-shrink: 0 !important;
@@ -239,9 +275,18 @@ def inject_theme_css() -> None:
     .stTabs [aria-selected="true"], .stTabs [role="tab"][aria-selected="true"] {{
         color: {theme["active_tab_text"]} !important;
         background-color: {theme["active_tab_bg"]} !important;
-        border: 1.5px solid {theme["active_tab_bg"]} !important;
+        border: 1px solid {theme["active_tab_bg"]} !important;
         font-weight: 700 !important;
         box-shadow: { '0 2px 10px rgba(255, 215, 98, 0.3)' if is_dark else '0 2px 8px rgba(20, 33, 61, 0.2)' } !important;
+    }}
+
+    .stTabs [aria-selected="true"] p,
+    .stTabs [aria-selected="true"] span,
+    .stTabs [aria-selected="true"] div,
+    .stTabs [role="tab"][aria-selected="true"] p,
+    .stTabs [role="tab"][aria-selected="true"] span,
+    .stTabs [role="tab"][aria-selected="true"] div {{
+        color: {theme["active_tab_text"]} !important;
     }}
 
     .stTabs [data-baseweb="tab-highlight"], .stTabs [role="tab"] ~ span {{
