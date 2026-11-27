@@ -14,4 +14,4 @@ dwave-neal>=0.6
 dwave-samplers>=1.0   # TabuSampler (default QUBO solver)
 
 # Streamlit frontend
-streamlit>=1.35
+streamlit>=1.65,<1.70

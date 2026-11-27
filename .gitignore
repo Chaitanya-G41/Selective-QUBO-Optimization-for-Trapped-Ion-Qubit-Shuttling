@@ -9,3 +9,7 @@ __pycache__/
 .idea/
 *.egg-info/
 
+screenshots/
+take_screenshots.py
+screenshots/
+take_screenshots.py

@@ -45,7 +45,7 @@ from qubo_formulator import InfeasibleWindow, QUBOFormulator, QUBOProblem, Windo
 from qubo_solver import QUBOSolver
 from solution_decoder import MovePlan, SolutionDecoder
 from walk_planner import (
-    UNIT_COSTS, BoardView, ops_cost, plan_walk, trap_of, walk_cost, walk_ops,
+    TIME_COSTS_US, UNIT_COSTS, BoardView, ops_cost, plan_walk, trap_of, walk_cost, walk_ops,
 )
 
 logger = logging.getLogger("shaw_router.congestion")
@@ -111,6 +111,7 @@ class CongestionHandler:
         max_bqm_variables: int = 3000,
         max_time_horizon: int = 24,
         planning_mode: str = "qubo",
+        record_events: bool = False,
     ) -> None:
         if planning_mode not in ("qubo", "incumbent"):
             raise ValueError("planning_mode must be qubo or incumbent")
@@ -138,6 +139,7 @@ class CongestionHandler:
         self.staged_effort = staged_effort
         self.max_bqm_variables = max_bqm_variables
         self.max_time_horizon = max_time_horizon
+        self.record_events = record_events
         self._solve_counter = 0
         self.stats: Dict[str, Any] = {
             "total_calls": 0,
@@ -156,6 +158,7 @@ class CongestionHandler:
             "early_optimal": 0,
             "incumbent_plans": 0,
             "window_records": [],
+            "event_records": [],
             "chunked_plans": 0,    # accepted plans solved in several windows
             "qubo_skips": Counter(),  # why a considered path did not get a QUBO plan
             "kappa_values": [],
@@ -201,15 +204,63 @@ class CongestionHandler:
                 self.stats["rerouted"] += 1
                 greedy = Resolution(alt, outcome="rerouted")
 
-        if pg is not None and self.qubo_enabled and self.should_trigger_qubo(kappa, rho, depth):
+        triggered = bool(pg is not None and self.qubo_enabled and self.should_trigger_qubo(kappa, rho, depth))
+        start_snapshot = None
+        prev_win_count = len(self.stats["window_records"])
+        if self.record_events and pg is not None:
+            start_snapshot = {placement.occupant_of(v): v for v in pg.graph if placement.is_occupied(v)}
+
+        plan = None
+        if triggered:
             self.stats["qubo_triggers"] += 1
             started = time.perf_counter()
             plan = self._try_qubo(path, blocked, placement, pg, greedy.path,
                                   next_partner_pos or {}, next_partner_ions or {})
             self.stats["qubo_time_s"] += time.perf_counter() - started
-            if plan is not None:
-                self.stats["qubo_accepted"] += 1
-                return Resolution(greedy.path, plan=plan, outcome="qubo_accepted")
+
+        if self.record_events and pg is not None and start_snapshot is not None:
+            mover = placement.occupant_of(path[0])
+            greedy_ops_raw = walk_ops(pg, placement, greedy.path, mover) if mover is not None else []
+            greedy_us = ops_cost(pg, placement, greedy_ops_raw, TIME_COSTS_US) if greedy_ops_raw else 0.0
+            qubo_ops_raw = list(plan.ops) if plan is not None else list(greedy_ops_raw)
+            qubo_us = ops_cost(pg, placement, qubo_ops_raw, TIME_COSTS_US) if qubo_ops_raw else 0.0
+            win_nodes = list(self._window_nodes(greedy.path, placement, pg))
+            goal = goal_slots(pg, path[-1])
+            lower_bound = self._lower_bound(pg, path[0], goal)
+            new_recs = self.stats["window_records"][prev_win_count:]
+            qubo_vars = new_recs[-1]["variables"] if new_recs else None
+            solve_ms = sum(r["solve_s"] for r in new_recs) * 1000.0 if new_recs else None
+            solver_name = self.solver_options.get("method", "tabu") if new_recs else None
+            self.stats["event_records"].append({
+                "event_index": len(self.stats["event_records"]),
+                "start": start_snapshot,
+                "mover": mover,
+                "path": list(greedy.path),
+                "blocked": list(blocked),
+                "window_nodes": win_nodes,
+                "kappa": kappa,
+                "rho": rho,
+                "depth": depth,
+                "kappa_th": self.kappa_threshold,
+                "rho_th": self.rho_threshold,
+                "depth_th": self.depth_threshold,
+                "triggered": triggered,
+                "accepted": plan is not None,
+                "greedy_ops": greedy_ops_raw,
+                "greedy_count": len(greedy_ops_raw),
+                "greedy_us": greedy_us,
+                "qubo_ops": qubo_ops_raw,
+                "qubo_count": len(qubo_ops_raw),
+                "qubo_us": qubo_us,
+                "lower_bound": lower_bound,
+                "qubo_vars": qubo_vars,
+                "solver": solver_name,
+                "solve_ms": solve_ms,
+            })
+
+        if plan is not None:
+            self.stats["qubo_accepted"] += 1
+            return Resolution(greedy.path, plan=plan, outcome="qubo_accepted")
         return greedy
 
     # -----------------------------------------------------------------------
